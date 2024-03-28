@@ -2,3 +2,13 @@ crewai
 crewai[tools]
 langchain
 langchain-community
+beautifulsoup4
+feedparser
+mattsollamatools
+newspaper3k
+nltk
+numpy
+Requests
+scikit_learn
+sentence_transformers
+python-dotenv
