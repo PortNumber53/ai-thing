@@ -1,2 +1,4 @@
+crewai
 crewai[tools]
 langchain
+langchain-community
