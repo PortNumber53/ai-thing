@@ -1,0 +1,24 @@
+{
+  "done": true,
+  "migration": {
+    "name": "mig_cu68vm8bn5466o07l4o0",
+    "operations": [
+      {
+        "add_column": {
+          "table": "contents",
+          "column": {
+            "name": "content",
+            "type": "json",
+            "comment": "",
+            "default": "'{}'"
+          }
+        }
+      }
+    ]
+  },
+  "migrationType": "pgroll",
+  "name": "mig_cu68vm8bn5466o07l4o0",
+  "parent": "mig_cu68vgam1u3p8dmstvbg",
+  "schema": "public",
+  "startedAt": "2025-01-19T05:38:33.942301Z"
+}

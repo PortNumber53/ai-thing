@@ -1,0 +1,6 @@
+{
+  "databaseURL": "https://Mauricio-Sessue-Otta-s-workspace-1t0lbs.us-east-1.xata.sh/db/dbblogging",
+  "codegen": {
+    "output": "vendor/xata.ts"
+  }
+}
