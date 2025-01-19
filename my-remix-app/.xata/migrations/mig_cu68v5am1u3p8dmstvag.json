@@ -1,0 +1,24 @@
+{
+  "done": true,
+  "migration": {
+    "name": "mig_cu68v5am1u3p8dmstvag",
+    "operations": [
+      {
+        "add_column": {
+          "table": "contents",
+          "column": {
+            "name": "is_published",
+            "type": "bool",
+            "comment": "",
+            "default": "'false'"
+          }
+        }
+      }
+    ]
+  },
+  "migrationType": "pgroll",
+  "name": "mig_cu68v5am1u3p8dmstvag",
+  "parent": "mig_cu68ur0bn5466o07l4m0",
+  "schema": "public",
+  "startedAt": "2025-01-19T05:37:26.187443Z"
+}
