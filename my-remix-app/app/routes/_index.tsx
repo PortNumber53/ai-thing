@@ -2,6 +2,7 @@ import { MetaFunction, LoaderFunctionArgs } from "@remix-run/node";
 import { useLoaderData } from "@remix-run/react";
 import { getContent } from "~/lib/xata";
 import { json } from "@remix-run/node";
+import ReactMarkdown from 'react-markdown';
 
 export const meta: MetaFunction = () => {
   return [
@@ -50,14 +51,7 @@ export default function Index() {
           </h1>
           <nav>
             <ul className="flex space-x-4">
-              <li>
-                <a
-                  href="/edit"
-                  className={`px-3 py-1 rounded-md ${colors.primary} text-white hover:opacity-90 transition-opacity`}
-                >
-                  Edit
-                </a>
-              </li>
+              {/* Edit button removed */}
             </ul>
           </nav>
         </div>
@@ -66,25 +60,15 @@ export default function Index() {
       {/* Main Content */}
       <main className="container mx-auto px-4 py-12 flex-grow">
         <div className="max-w-3xl mx-auto">
-          {/* Hero Section */}
-          <section className="text-center mb-12">
-            <h2 className={`text-4xl font-bold mb-4 ${colors.text.primary}`}>
-              {payloadContent?.heroTitle}
-            </h2>
-            <p className={`text-xl max-w-2xl mx-auto ${colors.text.secondary}`}>
-              {payloadContent?.heroSubtitle}
-            </p>
-          </section>
 
           {/* Content Section */}
           <section
             className={`bg-white rounded-lg shadow-md p-8 ${colors.text.primary} prose prose-lg`}
           >
-            <h3 className={`text-2xl font-semibold mb-4 ${colors.text.primary} text-center`}>
-              {payloadContent?.title}
-            </h3>
             <div>
-              {payloadContent?.content?.current}
+              <ReactMarkdown>
+                {payloadContent?.content?.current}
+              </ReactMarkdown>
             </div>
           </section>
 
