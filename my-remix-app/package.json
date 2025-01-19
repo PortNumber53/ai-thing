@@ -19,13 +19,17 @@
     "@remix-run/cloudflare-pages": "^2.15.2",
     "@remix-run/react": "^2.15.2",
     "@xata.io/client": "^0.0.0-next.va121e4207b94bfe0a3c025fc00b247b923880930",
+    "clipboard-copy": "^4.0.1",
     "isbot": "^4.1.0",
+    "marked": "^15.0.6",
     "react": "^18.2.0",
-    "react-dom": "^18.2.0"
+    "react-dom": "^18.2.0",
+    "react-markdown": "^9.0.3"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20250109.0",
     "@remix-run/dev": "^2.15.2",
+    "@tailwindcss/typography": "^0.5.16",
     "@types/react": "^18.2.20",
     "@types/react-dom": "^18.2.7",
     "@typescript-eslint/eslint-plugin": "^6.7.4",

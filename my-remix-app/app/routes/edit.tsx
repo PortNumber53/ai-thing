@@ -1,6 +1,15 @@
 import { Form, useActionData, useLoaderData, useNavigation } from "@remix-run/react";
 import { ActionFunctionArgs, json, redirect } from "@remix-run/node";
 import { getContent, saveContent } from "~/lib/xata";
+import { useState, useEffect } from "react";
+import ReactMarkdown from 'react-markdown';
+
+// Themes for markdown preview
+const themes = {
+  default: 'prose prose-gray',
+  dark: 'prose prose-invert',
+  colorful: 'prose prose-blue'
+};
 
 // Validation function for content
 function validateContent(content: { title: string; body: string }) {
@@ -44,18 +53,20 @@ export async function action({ request }: ActionFunctionArgs) {
     // Save content
     await saveContent('homepage', homeContent);
 
-    return redirect('/');
+    return json({ 
+      success: true,
+      message: 'Content saved successfully'
+    });
   } catch (error) {
     console.error('Unexpected error in edit route:', error);
 
-    // More detailed error handling
     return json({
+      success: false,
       errors: {
         general: error instanceof Error
           ? `Failed to save content: ${error.message}`
           : 'An unexpected error occurred while saving content'
-      },
-      homeContent: null
+      }
     }, { status: 500 });
   }
 }
@@ -65,132 +76,92 @@ export default function EditPage() {
   const navigation = useNavigation();
   const loaderData = useLoaderData<typeof loader>();
 
-  // Prioritize actionData, fallback to loaderData
-  const { homeContent } = actionData || loaderData || {};
-  const errors = actionData?.errors || {};
+  // State for markdown content
+  const [markdownContent, setMarkdownContent] = useState(
+    actionData?.homeContent?.body || 
+    loaderData?.homeContent?.content?.current || 
+    ''
+  );
+
+  // State for markdown title
+  const [markdownTitle, setMarkdownTitle] = useState(
+    actionData?.homeContent?.title || 
+    loaderData?.homeContent?.title || 
+    ''
+  );
+
+  // State for save success message
+  const [saveMessage, setSaveMessage] = useState<string | null>(null);
+
+  // Effect to handle save success message
+  useEffect(() => {
+    if (actionData?.success) {
+      setSaveMessage(actionData.message || 'Content saved successfully');
+      const timer = setTimeout(() => setSaveMessage(null), 3000);
+      return () => clearTimeout(timer);
+    }
+  }, [actionData]);
+
+  // Handle markdown content change
+  const handleContentChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    setMarkdownContent(e.target.value);
+  };
+
+  // Handle markdown title change
+  const handleTitleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setMarkdownTitle(e.target.value);
+  };
 
   return (
-    <div className="h-screen bg-gray-100 flex flex-col antialiased">
-      {/* Window Header */}
-      <div className="bg-gray-200 border-b border-gray-300 px-6 py-3 flex items-center justify-between">
-        <div className="flex items-center space-x-3">
-          <div className="w-3 h-3 bg-red-500 rounded-full"></div>
-          <div className="w-3 h-3 bg-yellow-500 rounded-full"></div>
-          <div className="w-3 h-3 bg-green-500 rounded-full"></div>
-        </div>
-        <h2 className="text-sm font-medium text-gray-600">
-          Edit Homepage Content
-        </h2>
-        <div className="w-12"></div>
-      </div>
-
-      {/* Toolbar */}
-      <div className="bg-gray-50 border-b border-gray-200 px-6 py-3 flex items-center justify-between">
-        <div className="flex items-center space-x-4">
-          <button className="text-gray-600 hover:bg-gray-200 p-2 rounded transition-colors">
-            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" />
-            </svg>
-          </button>
-          <button className="text-gray-600 hover:bg-gray-200 p-2 rounded transition-colors">
-            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14 5l7 7m0 0l-7 7m7-7H3" />
-            </svg>
-          </button>
-        </div>
-        <div className="text-xs text-gray-500">
-          Last saved: {new Date().toLocaleString()}
-        </div>
-      </div>
-
-      {/* Content Area */}
-      <div className="flex-grow overflow-auto p-8">
-        <div className="max-w-4xl mx-auto bg-white shadow-lg rounded-lg p-8 space-y-6">
-          {/* Error Handling */}
-          {errors.general && (
-            <div className="bg-red-50 border border-red-200 text-red-800 px-4 py-3 rounded-lg flex items-center">
-              <svg className="h-5 w-5 text-red-400 mr-3" fill="currentColor" viewBox="0 0 20 20">
-                <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" />
-              </svg>
-              <p className="text-sm">{errors.general}</p>
-            </div>
+    <Form method="post" className="h-screen flex flex-col">
+      {/* Header */}
+      <header className="bg-gray-100 border-b p-4 flex justify-between items-center">
+        <h1 className="text-xl font-semibold">Markdown Editor</h1>
+        <div className="space-x-2 flex items-center">
+          {saveMessage && (
+            <span className="text-green-600 mr-4">{saveMessage}</span>
           )}
+          <button 
+            type="submit"
+            disabled={navigation.state === 'submitting'}
+            className={`px-4 py-2 rounded text-white transition-all duration-200 ${
+              navigation.state === 'submitting'
+                ? 'bg-blue-500 cursor-wait'
+                : 'bg-blue-600 hover:bg-blue-700'
+            }`}
+          >
+            {navigation.state === 'submitting' ? 'Saving...' : 'Save'}
+          </button>
+        </div>
+      </header>
 
-          {/* Edit Form */}
-          <Form method="post" className="space-y-6">
-            {/* Title Input */}
-            <div>
-              <label 
-                htmlFor="title" 
-                className="block text-sm font-medium text-gray-700 mb-2"
-              >
-                Page Title
-              </label>
-              <input
-                id="title"
-                type="text"
-                name="title"
-                defaultValue={homeContent?.title}
-                placeholder="Enter your page title"
-                className={`w-full px-3 py-2 border rounded-md focus:outline-none focus:ring-2 ${
-                  errors.title 
-                    ? 'border-red-300 focus:ring-red-500' 
-                    : 'border-gray-300 focus:ring-blue-500'
-                } transition-all duration-200`}
-              />
-              {errors.title && (
-                <p className="mt-2 text-sm text-red-600">{errors.title}</p>
-              )}
-            </div>
+      {/* Two-Column Layout */}
+      <div className="flex flex-grow overflow-hidden">
+        {/* Left Column: Markdown Input */}
+        <div className="w-1/2 border-r p-4 flex flex-col">
+          <input 
+            type="text"
+            name="title"
+            placeholder="Enter title"
+            value={markdownTitle}
+            onChange={handleTitleChange}
+            className="w-full p-2 mb-4 border rounded text-xl font-bold"
+          />
+          <textarea 
+            name="body"
+            placeholder="Write your markdown here..."
+            value={markdownContent}
+            onChange={handleContentChange}
+            className="flex-grow w-full p-2 border rounded resize-none"
+          />
+        </div>
 
-            {/* Body Input */}
-            <div>
-              <label 
-                htmlFor="body" 
-                className="block text-sm font-medium text-gray-700 mb-2"
-              >
-                Page Content
-              </label>
-              <textarea
-                id="body"
-                name="body"
-                rows={10}
-                defaultValue={homeContent?.content?.current}
-                placeholder="Write your page content here..."
-                className={`w-full px-3 py-2 border rounded-md focus:outline-none focus:ring-2 ${
-                  errors.body 
-                    ? 'border-red-300 focus:ring-red-500' 
-                    : 'border-gray-300 focus:ring-blue-500'
-                } transition-all duration-200`}
-              />
-              {errors.body && (
-                <p className="mt-2 text-sm text-red-600">{errors.body}</p>
-              )}
-            </div>
-
-            {/* Submit Button */}
-            <div className="flex justify-end space-x-4">
-              <button
-                type="button"
-                className="px-4 py-2 text-gray-600 hover:bg-gray-100 rounded-md transition-colors"
-              >
-                Cancel
-              </button>
-              <button
-                type="submit"
-                disabled={navigation.state === 'submitting'}
-                className={`px-6 py-2 rounded-md text-white transition-all duration-200 ${
-                  navigation.state === 'submitting'
-                    ? 'bg-blue-500 cursor-wait'
-                    : 'bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500'
-                }`}
-              >
-                {navigation.state === 'submitting' ? 'Saving...' : 'Save Changes'}
-              </button>
-            </div>
-          </Form>
+        {/* Right Column: Markdown Preview */}
+        <div className="w-1/2 p-4 bg-gray-50 overflow-auto prose max-w-none">
+          <h1>{markdownTitle}</h1>
+          <ReactMarkdown>{markdownContent}</ReactMarkdown>
         </div>
       </div>
-    </div>
+    </Form>
   );
 }
