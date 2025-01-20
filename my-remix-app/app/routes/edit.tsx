@@ -3,6 +3,9 @@ import { ActionFunctionArgs, json, redirect } from "@remix-run/node";
 import { getContent, saveContent } from "~/lib/xata";
 import { useState, useEffect } from "react";
 import ReactMarkdown from 'react-markdown';
+import rehypeRaw from 'rehype-raw'
+import remarkGfm from "remark-gfm";
+
 
 // Themes for markdown preview
 const themes = {
@@ -53,7 +56,7 @@ export async function action({ request }: ActionFunctionArgs) {
     // Save content
     await saveContent('homepage', homeContent);
 
-    return json({ 
+    return json({
       success: true,
       message: 'Content saved successfully'
     });
@@ -78,15 +81,15 @@ export default function EditPage() {
 
   // State for markdown content
   const [markdownContent, setMarkdownContent] = useState(
-    actionData?.homeContent?.body || 
-    loaderData?.homeContent?.content?.current || 
+    actionData?.homeContent?.body ||
+    loaderData?.homeContent?.content?.current ||
     ''
   );
 
   // State for markdown title
   const [markdownTitle, setMarkdownTitle] = useState(
-    actionData?.homeContent?.title || 
-    loaderData?.homeContent?.title || 
+    actionData?.homeContent?.title ||
+    loaderData?.homeContent?.title ||
     ''
   );
 
@@ -121,7 +124,7 @@ export default function EditPage() {
           {saveMessage && (
             <span className="text-green-600 mr-4">{saveMessage}</span>
           )}
-          <button 
+          <button
             type="submit"
             disabled={navigation.state === 'submitting'}
             className={`px-4 py-2 rounded text-white transition-all duration-200 ${
@@ -138,28 +141,28 @@ export default function EditPage() {
       {/* Two-Column Layout */}
       <div className="flex flex-grow overflow-hidden">
         {/* Left Column: Markdown Input */}
-        <div className="w-1/2 border-r p-4 flex flex-col">
-          <input 
+        <div className="w-1/2 border-r border-gray-200 p-4 flex flex-col bg-gray-50">
+          <input
             type="text"
             name="title"
             placeholder="Enter title"
             value={markdownTitle}
             onChange={handleTitleChange}
-            className="w-full p-2 mb-4 border rounded text-xl font-bold"
+            className="w-full p-2 mb-4 border border-gray-300 rounded text-xl font-bold text-gray-800 bg-white focus:outline-none focus:ring-2 focus:ring-blue-200 focus:border-blue-300"
           />
-          <textarea 
+          <textarea
             name="body"
             placeholder="Write your markdown here..."
             value={markdownContent}
             onChange={handleContentChange}
-            className="flex-grow w-full p-2 border rounded resize-none"
+            className="flex-grow w-full p-2 border border-gray-300 rounded resize-none text-gray-700 bg-white focus:outline-none focus:ring-2 focus:ring-blue-200 focus:border-blue-300"
           />
         </div>
 
         {/* Right Column: Markdown Preview */}
         <div className="w-1/2 p-4 bg-gray-50 overflow-auto prose max-w-none">
           <h1>{markdownTitle}</h1>
-          <ReactMarkdown>{markdownContent}</ReactMarkdown>
+          <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]}>{markdownContent}</ReactMarkdown>
         </div>
       </div>
     </Form>

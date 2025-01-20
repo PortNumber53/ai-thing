@@ -25,4 +25,9 @@ export default defineConfig({
     }),
     tsconfigPaths(),
   ],
+  define: {
+    "process.env.XATA_BRANCH": JSON.stringify(process.env.XATA_BRANCH),
+    "process.env.XATA_API_KEY": JSON.stringify(process.env.XATA_API_KEY),
+    "process.env.XATA_DATABASE_URL": JSON.stringify(process.env.XATA_DATABASE_URL),
+  },
 });
