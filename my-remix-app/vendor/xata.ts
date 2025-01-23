@@ -30,6 +30,14 @@ const tables = [
     },
     columns: [
       {
+        name: "category",
+        type: "text",
+        notNull: true,
+        unique: false,
+        defaultValue: "'content'::text",
+        comment: "",
+      },
+      {
         name: "content",
         type: "json",
         notNull: true,
