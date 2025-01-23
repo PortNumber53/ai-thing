@@ -1,0 +1,24 @@
+{
+  "done": true,
+  "migration": {
+    "name": "mig_cu7blogbn5466o07lfs0",
+    "operations": [
+      {
+        "add_column": {
+          "table": "contents",
+          "column": {
+            "name": "category",
+            "type": "text",
+            "comment": "",
+            "default": "'content'"
+          }
+        }
+      }
+    ]
+  },
+  "migrationType": "pgroll",
+  "name": "mig_cu7blogbn5466o07lfs0",
+  "parent": "mig_cu68vm8bn5466o07l4o0",
+  "schema": "public",
+  "startedAt": "2025-01-20T21:06:44.145075Z"
+}
