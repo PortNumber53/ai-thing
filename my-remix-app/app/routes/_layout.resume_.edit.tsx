@@ -20,7 +20,7 @@ export async function loader({ params }: LoaderFunctionArgs) {
 
   const resume = await xata.db.contents
     .filter({
-      url_path: "resume/current",
+      url_path: "/resume/current",
       category: "resume",
     })
     .select([
@@ -61,30 +61,35 @@ export async function action({ request }: ActionFunctionArgs) {
 
   const resume = await xata.db.contents
     .filter({
-      url_path: "resume/current",
+      url_path: "/resume/current",
       category: "resume",
     })
     .getFirst();
 
+  let savedResume: typeof resume;
   if (!resume) {
     // Create new resume if it doesn't exist
-    await xata.db.contents.create({
+    savedResume = await xata.db.contents.create({
       title,
       content: { current: content },
       meta: { description },
-      url_path: "resume/current",
+      url_path: "/resume/current",
       category: "resume",
     });
   } else {
     // Update existing resume
-    await xata.db.contents.update(resume.xata_id, {
+    savedResume = await xata.db.contents.update(resume.xata_id, {
       title,
       content: { current: content },
       meta: { ...resume.meta, description },
     });
   }
 
-  return redirect("/resume/current");
+  return json({
+    success: true,
+    message: "Resume saved successfully",
+    resume: savedResume,
+  });
 }
 
 export default function EditResume() {
@@ -95,12 +100,32 @@ export default function EditResume() {
   const description =
     (resume.meta as { description?: string })?.description || "";
   const isSubmitting = navigation.state === "submitting";
+  const showSuccessMessage = actionData?.success && navigation.state === "idle";
 
   return (
     <main className="container mx-auto px-4 py-12 flex-grow">
       <div className="max-w-7xl mx-auto">
-        <div className="mb-6">
+        <div className="mb-6 flex justify-between items-center">
           <h1 className="text-2xl font-semibold text-gray-900">Edit Resume</h1>
+          {showSuccessMessage && (
+            <div className="text-sm text-green-600 bg-green-50 px-3 py-1 rounded-full flex items-center">
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                className="h-4 w-4 mr-1"
+                viewBox="0 0 20 20"
+                fill="currentColor"
+                aria-label="Success"
+                role="img"
+              >
+                <path
+                  fillRule="evenodd"
+                  d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z"
+                  clipRule="evenodd"
+                />
+              </svg>
+              {actionData?.message}
+            </div>
+          )}
         </div>
         <Form method="post" className="space-y-6">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
