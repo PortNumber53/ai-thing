@@ -12,6 +12,12 @@ import ReactMarkdown from "react-markdown";
 import rehypeRaw from "rehype-raw";
 import remarkGfm from "remark-gfm";
 
+interface ActionData {
+  success: boolean;
+  message: string;
+  project?: any; // Using any for now since we don't have the full project type
+}
+
 export async function loader({ params }: LoaderFunctionArgs) {
   const xata = getXataClient();
   if (!xata) {
@@ -101,23 +107,48 @@ export async function action({ request, params }: ActionFunctionArgs) {
     });
   }
 
-  return redirect(`/portfolio/${project_path}`);
+  return json<ActionData>({
+    success: true,
+    message: "Project saved successfully",
+    project: project,
+  });
 }
 
 export default function EditProject() {
   const { project } = useLoaderData<typeof loader>();
-  const actionData = useActionData<typeof action>();
+  const actionData = useActionData<ActionData>();
   const navigation = useNavigation();
+  const [title, setTitle] = useState(project.title || "");
   const [content, setContent] = useState(project.content?.current || "");
   const description =
     (project.meta as { description?: string })?.description || "";
   const isSubmitting = navigation.state === "submitting";
+  const showSuccessMessage = actionData?.success && navigation.state === "idle";
 
   return (
     <main className="container mx-auto px-4 py-12 flex-grow">
       <div className="max-w-7xl mx-auto">
-        <div className="mb-6">
+        <div className="mb-6 flex justify-between items-center">
           <h1 className="text-2xl font-semibold text-gray-900">Edit Project</h1>
+          {showSuccessMessage && (
+            <div className="text-sm text-green-600 bg-green-50 px-3 py-1 rounded-full flex items-center">
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                className="h-4 w-4 mr-1"
+                viewBox="0 0 20 20"
+                fill="currentColor"
+                aria-label="Success"
+                role="img"
+              >
+                <path
+                  fillRule="evenodd"
+                  d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z"
+                  clipRule="evenodd"
+                />
+              </svg>
+              {actionData?.message}
+            </div>
+          )}
         </div>
         <Form method="post" className="space-y-6">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -134,7 +165,8 @@ export default function EditProject() {
                   type="text"
                   name="title"
                   id="title"
-                  defaultValue={project.title || ""}
+                  value={title}
+                  onChange={(e) => setTitle(e.target.value)}
                   className="w-full px-3 py-2 border border-gray-200 rounded-md shadow-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-colors bg-white text-gray-900"
                   required
                 />
@@ -147,10 +179,10 @@ export default function EditProject() {
                 >
                   Description
                 </label>
-                <input
-                  type="text"
+                <textarea
                   name="description"
                   id="description"
+                  rows={3}
                   defaultValue={description}
                   className="w-full px-3 py-2 border border-gray-200 rounded-md shadow-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-colors bg-white text-gray-900"
                 />
@@ -237,7 +269,7 @@ export default function EditProject() {
             {/* Right Column - Preview */}
             <div className="bg-gray-50 rounded-lg p-6 border border-gray-200">
               <div className="prose prose-lg max-w-none">
-                <h1>{project.title || "Project"}</h1>
+                <h1>{title || "Project"}</h1>
                 <ReactMarkdown
                   remarkPlugins={[remarkGfm]}
                   rehypePlugins={[rehypeRaw]}
