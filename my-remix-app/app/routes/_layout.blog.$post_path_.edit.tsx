@@ -7,10 +7,16 @@ import {
   useNavigation,
 } from "@remix-run/react";
 import { getXataClient } from "~/lib/xata";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeRaw from "rehype-raw";
 import remarkGfm from "remark-gfm";
+
+interface ActionData {
+  success: boolean;
+  message: string;
+  post?: any; // Using any for now since we don't have the full post type
+}
 
 export async function loader({ params }: LoaderFunctionArgs) {
   const xata = getXataClient();
@@ -18,8 +24,12 @@ export async function loader({ params }: LoaderFunctionArgs) {
     throw new Error("Xata client not initialized");
   }
 
-  const { category, post_path } = params;
-  const fullPath = `/blog/${category}/${post_path}`;
+  const { post_path } = params;
+  if (!post_path) {
+    throw new Response("Post path is required", { status: 400 });
+  }
+
+  const fullPath = `blog/${post_path}`;
 
   const post = await xata.db.contents
     .filter({
@@ -44,7 +54,7 @@ export async function loader({ params }: LoaderFunctionArgs) {
         content: { current: "# Introduction\n\n# Content\n\n# Conclusion" },
         meta: {
           description: "Blog post description",
-          subcategory: category,
+          subcategory: "blog",
         },
         xata_createdat: new Date().toISOString(),
       },
@@ -54,20 +64,18 @@ export async function loader({ params }: LoaderFunctionArgs) {
   return json({ post });
 }
 
-interface ActionData {
-  success: boolean;
-  message: string;
-  post?: any; // Using any for now since we don't have the full post type
-}
-
 export async function action({ request, params }: ActionFunctionArgs) {
   const formData = await request.formData();
   const title = formData.get("title") as string;
   const content = formData.get("content") as string;
   const description = formData.get("description") as string;
 
-  const { category, post_path } = params;
-  const fullPath = `/blog/${category}/${post_path}`;
+  const { post_path } = params;
+  if (!post_path) {
+    throw new Response("Post path is required", { status: 400 });
+  }
+
+  const fullPath = `blog/${post_path}`;
 
   const xata = getXataClient();
   if (!xata) {
@@ -81,19 +89,18 @@ export async function action({ request, params }: ActionFunctionArgs) {
     })
     .getFirst();
 
-  let updatedPost;
   if (!post) {
     // Create new post if it doesn't exist
-    updatedPost = await xata.db.contents.create({
+    await xata.db.contents.create({
       title,
       content: { current: content },
-      meta: { description, subcategory: category },
+      meta: { description },
       url_path: fullPath,
       category: "blog",
     });
   } else {
     // Update existing post
-    updatedPost = await xata.db.contents.update(post.xata_id, {
+    await xata.db.contents.update(post.xata_id, {
       title,
       content: { current: content },
       meta: { ...post.meta, description },
@@ -103,18 +110,29 @@ export async function action({ request, params }: ActionFunctionArgs) {
   return json<ActionData>({
     success: true,
     message: "Post saved successfully",
-    post: updatedPost,
+    post: post,
   });
 }
 
-export default function EditBlogPost() {
+export default function EditPost() {
   const { post } = useLoaderData<typeof loader>();
-  const actionData = useActionData<typeof action>();
+  const actionData = useActionData<ActionData>();
   const navigation = useNavigation();
+
+  // Initialize state with post title
   const [title, setTitle] = useState(post.title || "");
   const [content, setContent] = useState(post.content?.current || "");
-  const description =
-    (post.meta as { description?: string })?.description || "";
+  const [description, setDescription] = useState(
+    (post.meta as { description?: string })?.description || ""
+  );
+
+  // Update state when post changes
+  useEffect(() => {
+    setTitle(post.title || "");
+    setContent(post.content?.current || "");
+    setDescription((post.meta as { description?: string })?.description || "");
+  }, [post]);
+
   const isSubmitting = navigation.state === "submitting";
   const showSuccessMessage = actionData?.success && navigation.state === "idle";
 
@@ -172,11 +190,12 @@ export default function EditBlogPost() {
                 >
                   Description
                 </label>
-                <input
-                  type="text"
+                <textarea
                   name="description"
                   id="description"
-                  defaultValue={description}
+                  rows={3}
+                  value={description}
+                  onChange={(e) => setDescription(e.target.value)}
                   className="w-full px-3 py-2 border border-gray-200 rounded-md shadow-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-colors bg-white text-gray-900"
                 />
               </div>
@@ -262,7 +281,7 @@ export default function EditBlogPost() {
             {/* Right Column - Preview */}
             <div className="bg-gray-50 rounded-lg p-6 border border-gray-200">
               <div className="prose prose-lg max-w-none">
-                <h1>{title || "Untitled Post"}</h1>
+                <h1>{title || "Blog Post"}</h1>
                 <ReactMarkdown
                   remarkPlugins={[remarkGfm]}
                   rehypePlugins={[rehypeRaw]}
