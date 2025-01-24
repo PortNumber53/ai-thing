@@ -81,7 +81,7 @@ export async function action({ request, params }: ActionFunctionArgs) {
     })
     .getFirst();
 
-  let updatedPost;
+  let updatedPost: typeof post;
   if (!post) {
     // Create new post if it doesn't exist
     updatedPost = await xata.db.contents.create({
