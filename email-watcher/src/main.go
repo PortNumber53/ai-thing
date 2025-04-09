@@ -238,7 +238,7 @@ msgTime := time.UnixMilli(msg.InternalDate)
 				RemoveLabelIds: []string{"UNREAD"},
 			}).Do()
 			if err != nil {
-				log.Printf("Error marking message as read: %v", err)
+log.Printf("Error marking message %s as read: %v", m.Id, err)
 			}
 		}
 
