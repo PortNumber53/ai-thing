@@ -228,7 +228,7 @@ func (ew *EmailWatcher) watchEmails(ctx context.Context) error {
 			processedCount++
 
 			// Update last processed time
-			msgTime := time.Unix(msg.InternalDate/1000, 0)
+msgTime := time.UnixMilli(msg.InternalDate)
 			if msgTime.After(lastProcessedTime) {
 				lastProcessedTime = msgTime
 			}
