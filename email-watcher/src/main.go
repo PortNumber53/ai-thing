@@ -52,7 +52,9 @@ if err := os.MkdirAll(tokenDir, 0700); err != nil {
 		ew.lastProcessedTime = time.Now().Add(-ew.processWindow)
 		return nil
 	} else if err != nil {
-		return err
+	} else if err != nil {
+		return fmt.Errorf("could not read last processed file: %w", err)
+	}
 	}
 
 	var lastTime time.Time
