@@ -36,11 +36,11 @@ func NewEmailWatcher(config *oauth2.Config, client *http.Client) *EmailWatcher {
 func (ew *EmailWatcher) loadLastProcessedTime() error {
 	configDir, err := os.UserConfigDir()
 	if err != nil {
-		return err
+		return fmt.Errorf("could not get user config directory: %w", err)
 	}
 	
 	tokenDir := filepath.Join(configDir, "ai-thing", "tokens")
-if err := os.MkdirAll(tokenDir, 0700); err != nil {
+	if err := os.MkdirAll(tokenDir, 0700); err != nil {
 		return fmt.Errorf("could not create token directory: %w", err)
 	}
 
@@ -52,14 +52,12 @@ if err := os.MkdirAll(tokenDir, 0700); err != nil {
 		ew.lastProcessedTime = time.Now().Add(-ew.processWindow)
 		return nil
 	} else if err != nil {
-	} else if err != nil {
 		return fmt.Errorf("could not read last processed file: %w", err)
-	}
 	}
 
 	var lastTime time.Time
 	if err := json.Unmarshal(data, &lastTime); err != nil {
-		return err
+		return fmt.Errorf("could not unmarshal last processed time: %w", err)
 	}
 
 	ew.lastProcessedTime = lastTime
@@ -69,22 +67,26 @@ if err := os.MkdirAll(tokenDir, 0700); err != nil {
 func (ew *EmailWatcher) saveLastProcessedTime(t time.Time) error {
 	configDir, err := os.UserConfigDir()
 	if err != nil {
-		return err
+		return fmt.Errorf("could not get user config directory: %w", err)
 	}
 	
 	tokenDir := filepath.Join(configDir, "ai-thing", "tokens")
 	if err := os.MkdirAll(tokenDir, 0700); err != nil {
-		return err
+		return fmt.Errorf("could not create token directory: %w", err)
 	}
 
 	lastProcessedFile := filepath.Join(tokenDir, "last_processed_time.json")
 	
 	data, err := json.Marshal(t)
 	if err != nil {
-		return err
+		return fmt.Errorf("could not marshal time: %w", err)
 	}
 
-	return os.WriteFile(lastProcessedFile, data, 0600)
+	if err := os.WriteFile(lastProcessedFile, data, 0600); err != nil {
+		return fmt.Errorf("could not write last processed time file: %w", err)
+	}
+
+	return nil
 }
 
 func (ew *EmailWatcher) authenticate(ctx context.Context) error {
@@ -164,6 +166,11 @@ func (ew *EmailWatcher) authenticate(ctx context.Context) error {
 }
 
 func (ew *EmailWatcher) watchEmails(ctx context.Context) error {
+	// Check if Gmail service is initialized
+	if ew.srv == nil {
+		return fmt.Errorf("Gmail service is not initialized. Please authenticate first")
+	}
+
 	if err := ew.loadLastProcessedTime(); err != nil {
 		log.Printf("Error loading last processed time: %v", err)
 		return err
@@ -188,21 +195,8 @@ func (ew *EmailWatcher) watchEmails(ctx context.Context) error {
 			continue
 		}
 
-		// Parse message timestamp
-		msgTime := time.Unix(msg.InternalDate/1000, 0)
-		
-		// Skip if message is older than last processed time
-		if msgTime.Before(ew.lastProcessedTime) {
-			continue
-		}
-
-		// Update last processed time if this message is newer
-		if msgTime.After(lastProcessedTime) {
-			lastProcessedTime = msgTime
-		}
-
-		// Extract sender and subject
-		var from, subject string
+		from := ""
+		subject := ""
 		for _, header := range msg.Payload.Headers {
 			switch header.Name {
 			case "From":
@@ -216,7 +210,9 @@ func (ew *EmailWatcher) watchEmails(ctx context.Context) error {
 		ew.processMessage(from, subject)
 		processedCount++
 
-		// Mark as read
+		// Mark as read: Using GmailModifyScope to remove UNREAD label
+		// This is the minimal required modification to track processed emails
+		// and prevent reprocessing the same emails in future runs
 		_, err = ew.srv.Users.Messages.Modify(user, m.Id, &gmail.ModifyMessageRequest{
 			RemoveLabelIds: []string{"UNREAD"},
 		}).Do()
@@ -243,20 +239,20 @@ func getTokenFilePath() (string, error) {
 	// Preferred location: ~/.config/ai-thing/tokens/gmail_token.json
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
-		return "", fmt.Errorf("could not get home directory: %v", err)
+		return "", fmt.Errorf("could not get home directory: %w", err)
 	}
 	tokenPath := filepath.Join(homeDir, ".config", "ai-thing", "tokens", "gmail_token.json")
 
 	// Ensure the directory exists
 	if err := os.MkdirAll(filepath.Dir(tokenPath), 0700); err != nil {
-		return "", fmt.Errorf("could not create token directory: %v", err)
+		return "", fmt.Errorf("could not create token directory: %w", err)
 	}
 
 	// Fallback: current working directory
 	if _, err := os.Stat(tokenPath); os.IsNotExist(err) {
 		currentDir, err := os.Getwd()
 		if err != nil {
-			return "", fmt.Errorf("could not get current working directory: %v", err)
+			return "", fmt.Errorf("could not get current working directory: %w", err)
 		}
 		localTokenPath := filepath.Join(currentDir, "gmail_token.json")
 
@@ -264,7 +260,7 @@ func getTokenFilePath() (string, error) {
 		if _, err := os.Stat(localTokenPath); err == nil {
 			log.Println("Found token in local directory. Migrating to preferred location.")
 			if err := os.Rename(localTokenPath, tokenPath); err != nil {
-				return "", fmt.Errorf("could not migrate token: %v", err)
+				return "", fmt.Errorf("could not migrate token: %w", err)
 			}
 		}
 	}
