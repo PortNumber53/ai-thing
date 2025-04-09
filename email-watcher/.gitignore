@@ -1,0 +1,16 @@
+# Ignore the Gmail OAuth token file
+.gmail_token.json
+gmail_token.json
+~/.config/ai-thing/tokens/gmail_token.json
+
+# Environment files
+.env
+
+# Compiled binaries
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Dependency directories
+vendor/
