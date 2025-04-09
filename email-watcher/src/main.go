@@ -5,11 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
+	"github.com/joho/godotenv"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 	"google.golang.org/api/gmail/v1"
@@ -17,42 +18,249 @@ import (
 )
 
 type EmailWatcher struct {
-	service *gmail.Service
-	config  *oauth2.Config
-	token   *oauth2.Token
+	srv            *gmail.Service
+	config         *oauth2.Config
+	client         *http.Client
+	lastProcessedTime time.Time
+	processWindow  time.Duration
 }
 
-const (
-	tokenFileName = "gmail_token.json"
-	tokenSubdir   = ".config/ai-thing/tokens"
-)
+func NewEmailWatcher(config *oauth2.Config, client *http.Client) *EmailWatcher {
+	return &EmailWatcher{
+		config:         config,
+		client:         client,
+		processWindow:  24 * time.Hour, // Default to 24 hours
+	}
+}
+
+func (ew *EmailWatcher) loadLastProcessedTime() error {
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		return fmt.Errorf("could not get user config directory: %w", err)
+	}
+	
+	tokenDir := filepath.Join(configDir, "ai-thing", "tokens")
+	if err := os.MkdirAll(tokenDir, 0700); err != nil {
+		return fmt.Errorf("could not create token directory: %w", err)
+	}
+
+	lastProcessedFile := filepath.Join(tokenDir, "last_processed_time.json")
+	
+	data, err := os.ReadFile(lastProcessedFile)
+	if os.IsNotExist(err) {
+		// If file doesn't exist, set to 24 hours ago
+		ew.lastProcessedTime = time.Now().Add(-ew.processWindow)
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("could not read last processed file: %w", err)
+	}
+
+	var lastTime time.Time
+	if err := json.Unmarshal(data, &lastTime); err != nil {
+		return fmt.Errorf("could not unmarshal last processed time: %w", err)
+	}
+
+	ew.lastProcessedTime = lastTime
+	return nil
+}
+
+func (ew *EmailWatcher) saveLastProcessedTime(t time.Time) error {
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		return fmt.Errorf("could not get user config directory: %w", err)
+	}
+	
+	tokenDir := filepath.Join(configDir, "ai-thing", "tokens")
+	if err := os.MkdirAll(tokenDir, 0700); err != nil {
+		return fmt.Errorf("could not create token directory: %w", err)
+	}
+
+	lastProcessedFile := filepath.Join(tokenDir, "last_processed_time.json")
+	
+	data, err := json.Marshal(t)
+	if err != nil {
+		return fmt.Errorf("could not marshal time: %w", err)
+	}
+
+	if err := os.WriteFile(lastProcessedFile, data, 0600); err != nil {
+		return fmt.Errorf("could not write last processed time file: %w", err)
+	}
+
+	return nil
+}
+
+func (ew *EmailWatcher) authenticate(ctx context.Context) error {
+	// Get the token file path
+	tokenPath, err := getTokenFilePath()
+	if err != nil {
+		return fmt.Errorf("could not determine token file path: %v", err)
+	}
+
+	// Try to read the existing token
+	tokenFile, err := os.ReadFile(tokenPath)
+	var token *oauth2.Token
+	if err == nil {
+		if err := json.Unmarshal(tokenFile, &token); err != nil {
+			log.Printf("Could not parse existing token: %v", err)
+		}
+	}
+
+	// If we have a token, try to use it
+	if token != nil {
+		tokenSource := ew.config.TokenSource(ctx, token)
+		
+		// Try to refresh the token
+		refreshedToken, err := tokenSource.Token()
+		if err != nil {
+			log.Printf("Could not refresh token: %v", err)
+			token = nil
+		} else {
+			token = refreshedToken
+			
+			// Try to create service with this token
+			srv, err := gmail.NewService(ctx, option.WithTokenSource(tokenSource))
+			if err != nil {
+				log.Printf("Failed to create Gmail service: %v", err)
+				token = nil
+			} else {
+				// Verify token has correct permissions
+				_, err = srv.Users.GetProfile("me").Do()
+				if err != nil {
+					log.Printf("Insufficient token permissions: %v", err)
+					token = nil
+				} else {
+					// Token is valid, save it and return
+					ew.srv = srv
+					return saveToken(token)
+				}
+			}
+		}
+	}
+
+	// If no valid token, proceed with manual authentication
+	authURL := ew.config.AuthCodeURL("state", oauth2.AccessTypeOffline)
+	fmt.Printf("Go to the following link in your browser: %v\n", authURL)
+	fmt.Println("Enter the authorization code:")
+	var code string
+	fmt.Scanln(&code)
+
+	// Exchange authorization code for token
+	token, err = ew.config.Exchange(ctx, code)
+	if err != nil {
+		return fmt.Errorf("failed to exchange token: %v", err)
+	}
+
+	// Create Gmail service with new token
+	srv, err := gmail.NewService(ctx, option.WithTokenSource(ew.config.TokenSource(ctx, token)))
+	if err != nil {
+		return fmt.Errorf("failed to create Gmail service: %v", err)
+	}
+
+	// Save the token
+	if err := saveToken(token); err != nil {
+		log.Printf("Warning: Could not save token: %v", err)
+	}
+
+	ew.srv = srv
+	return nil
+}
+
+func (ew *EmailWatcher) watchEmails(ctx context.Context) error {
+	// Check if Gmail service is initialized
+	if ew.srv == nil {
+		return fmt.Errorf("Gmail service is not initialized. Please authenticate first")
+	}
+
+	if err := ew.loadLastProcessedTime(); err != nil {
+		log.Printf("Error loading last processed time: %v", err)
+		return err
+	}
+
+	// List unread messages
+	user := "me"
+	listCall := ew.srv.Users.Messages.List(user).Q(fmt.Sprintf("is:unread after:%d", ew.lastProcessedTime.Unix()))
+	
+	r, err := listCall.Do()
+	if err != nil {
+		return fmt.Errorf("unable to retrieve messages: %v", err)
+	}
+
+	processedCount := 0
+	lastProcessedTime := ew.lastProcessedTime
+
+	for _, m := range r.Messages {
+		msg, err := ew.srv.Users.Messages.Get(user, m.Id).Do()
+		if err != nil {
+			log.Printf("Error getting message %s: %v", m.Id, err)
+			continue
+		}
+
+		from := ""
+		subject := ""
+		for _, header := range msg.Payload.Headers {
+			switch header.Name {
+			case "From":
+				from = header.Value
+			case "Subject":
+				subject = header.Value
+			}
+		}
+
+		// Process message
+		ew.processMessage(from, subject)
+		processedCount++
+
+		// Mark as read: Using GmailModifyScope to remove UNREAD label
+		// This is the minimal required modification to track processed emails
+		// and prevent reprocessing the same emails in future runs
+		_, err = ew.srv.Users.Messages.Modify(user, m.Id, &gmail.ModifyMessageRequest{
+			RemoveLabelIds: []string{"UNREAD"},
+		}).Do()
+		if err != nil {
+			log.Printf("Error marking message as read: %v", err)
+		}
+	}
+
+	// Save the latest processed time
+	if err := ew.saveLastProcessedTime(lastProcessedTime); err != nil {
+		log.Printf("Error saving last processed time: %v", err)
+	}
+
+	log.Printf("Processed %d new email(s)", processedCount)
+	return nil
+}
+
+func (ew *EmailWatcher) processMessage(from, subject string) {
+	log.Printf("New email from %s with subject: %s", from, subject)
+	// Add your custom processing logic here
+}
 
 func getTokenFilePath() (string, error) {
 	// Preferred location: ~/.config/ai-thing/tokens/gmail_token.json
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
-		return "", fmt.Errorf("could not get home directory: %v", err)
+		return "", fmt.Errorf("could not get home directory: %w", err)
 	}
-	tokenPath := filepath.Join(homeDir, tokenSubdir, tokenFileName)
+	tokenPath := filepath.Join(homeDir, ".config", "ai-thing", "tokens", "gmail_token.json")
 
 	// Ensure the directory exists
 	if err := os.MkdirAll(filepath.Dir(tokenPath), 0700); err != nil {
-		return "", fmt.Errorf("could not create token directory: %v", err)
+		return "", fmt.Errorf("could not create token directory: %w", err)
 	}
 
 	// Fallback: current working directory
 	if _, err := os.Stat(tokenPath); os.IsNotExist(err) {
 		currentDir, err := os.Getwd()
 		if err != nil {
-			return "", fmt.Errorf("could not get current working directory: %v", err)
+			return "", fmt.Errorf("could not get current working directory: %w", err)
 		}
-		localTokenPath := filepath.Join(currentDir, tokenFileName)
+		localTokenPath := filepath.Join(currentDir, "gmail_token.json")
 
 		// If a token exists in the local directory, use it and move it to the preferred location
 		if _, err := os.Stat(localTokenPath); err == nil {
 			log.Println("Found token in local directory. Migrating to preferred location.")
 			if err := os.Rename(localTokenPath, tokenPath); err != nil {
-				return "", fmt.Errorf("could not migrate token: %v", err)
+				return "", fmt.Errorf("could not migrate token: %w", err)
 			}
 		}
 	}
@@ -60,54 +268,7 @@ func getTokenFilePath() (string, error) {
 	return tokenPath, nil
 }
 
-func newEmailWatcher() (*EmailWatcher, error) {
-	// OAuth 2.0 configuration
-	config := &oauth2.Config{
-		ClientID:     os.Getenv("GOOGLE_CLIENT_ID"),
-		ClientSecret: os.Getenv("GOOGLE_CLIENT_SECRET"),
-		Scopes:       []string{gmail.GmailReadonlyScope},
-		Endpoint:     google.Endpoint,
-		RedirectURL:  "urn:ietf:wg:oauth:2.0:oob",
-	}
-
-	return &EmailWatcher{
-		config: config,
-	}, nil
-}
-
-// loadToken attempts to load a previously saved token
-func (ew *EmailWatcher) loadToken() error {
-	// Get the token file path
-	tokenPath, err := getTokenFilePath()
-	if err != nil {
-		return fmt.Errorf("could not determine token file path: %v", err)
-	}
-
-	// Try to read the token file
-	tokenFile, err := os.ReadFile(tokenPath)
-	if err != nil {
-		return fmt.Errorf("could not read token file %s: %v", tokenPath, err)
-	}
-
-	// Unmarshal the token
-	var token oauth2.Token
-	if err := json.Unmarshal(tokenFile, &token); err != nil {
-		return fmt.Errorf("could not parse token: %v", err)
-	}
-
-	// Check if the token is expired and can be refreshed
-	tokenSource := ew.config.TokenSource(context.Background(), &token)
-	refreshedToken, err := tokenSource.Token()
-	if err != nil {
-		return fmt.Errorf("could not refresh token: %v", err)
-	}
-
-	ew.token = refreshedToken
-	return nil
-}
-
-// saveToken saves the token to a file
-func (ew *EmailWatcher) saveToken() error {
+func saveToken(token *oauth2.Token) error {
 	// Get the token file path
 	tokenPath, err := getTokenFilePath()
 	if err != nil {
@@ -115,7 +276,7 @@ func (ew *EmailWatcher) saveToken() error {
 	}
 
 	// Marshal the token to JSON
-	tokenJSON, err := json.MarshalIndent(ew.token, "", "  ")
+	tokenJSON, err := json.MarshalIndent(token, "", "  ")
 	if err != nil {
 		return fmt.Errorf("could not marshal token: %v", err)
 	}
@@ -129,141 +290,44 @@ func (ew *EmailWatcher) saveToken() error {
 	return nil
 }
 
-func (ew *EmailWatcher) authenticate() error {
-	// First, try to load an existing token
-	err := ew.loadToken()
-	if err == nil {
-		// Token loaded successfully, create service with this token
-		service, err := gmail.NewService(context.Background(), option.WithTokenSource(ew.config.TokenSource(context.Background(), ew.token)))
-		if err != nil {
-			return fmt.Errorf("failed to create Gmail service with saved token: %v", err)
-		}
-		ew.service = service
-		return nil
+func init() {
+	// Load .env file
+	if err := godotenv.Load(); err != nil {
+		log.Println("No .env file found")
 	}
-
-	// Log the error for debugging, but proceed with manual authentication
-	log.Printf("Could not load existing token: %v", err)
-
-	// If loading token fails, proceed with manual authentication
-	authURL := ew.config.AuthCodeURL("state", oauth2.AccessTypeOffline)
-	fmt.Printf("Go to the following link in your browser: %v\n", authURL)
-	fmt.Print("Enter authorization code: ")
-	var code string
-	fmt.Scanln(&code)
-
-	// Exchange authorization code for token
-	token, err := ew.config.Exchange(context.Background(), code)
-	if err != nil {
-		return fmt.Errorf("failed to exchange token: %v", err)
-	}
-
-	// Create Gmail service
-	service, err := gmail.NewService(context.Background(), option.WithTokenSource(ew.config.TokenSource(context.Background(), token)))
-	if err != nil {
-		return fmt.Errorf("failed to create Gmail service: %v", err)
-	}
-
-	// Save the token for future use
-	ew.token = token
-	ew.service = service
-	if err := ew.saveToken(); err != nil {
-		log.Printf("Warning: Could not save token: %v", err)
-	}
-
-	return nil
-}
-
-func (ew *EmailWatcher) watchEmails() error {
-	// Start a loop to periodically check for new emails
-	for {
-		// List recent emails
-		user := "me"
-		r, err := ew.service.Users.Messages.List(user).Q("is:unread").Do()
-		if err != nil {
-			log.Printf("Error listing messages: %v", err)
-			time.Sleep(5 * time.Minute)
-			continue
-		}
-
-		// Process each unread message
-		for _, m := range r.Messages {
-			msg, err := ew.service.Users.Messages.Get(user, m.Id).Format("full").Do()
-			if err != nil {
-				log.Printf("Error getting message: %v", err)
-				continue
-			}
-
-			// Extract headers
-			var from, subject string
-			for _, header := range msg.Payload.Headers {
-				switch header.Name {
-				case "From":
-					from = header.Value
-				case "Subject":
-					subject = header.Value
-				}
-			}
-
-			// Process message
-			ew.processMessage(from, subject)
-		}
-
-		// Wait before checking again
-		time.Sleep(5 * time.Minute)
-	}
-}
-
-func (ew *EmailWatcher) processMessage(from, subject string) {
-	log.Printf("New email from %s with subject: %s", from, subject)
-
-	// Example processing logic
-	switch {
-	case strings.Contains(strings.ToLower(from), "github.com"):
-		log.Println("GitHub notification detected")
-		// Example: Send a notification or log GitHub-related emails
-		// You could add logic to parse GitHub email contents, track issues, etc.
-
-	case strings.Contains(strings.ToLower(subject), "invoice"):
-		log.Println("Invoice email detected")
-		// Example: Save invoice to a specific folder or trigger accounting workflow
-		// You might want to download attachments or extract invoice details
-
-	case strings.Contains(strings.ToLower(from), "urgent@company.com"):
-		log.Println("Urgent company email received")
-		// Example: Send an immediate notification via SMS or push notification
-		ew.sendUrgentNotification(from, subject)
-
-	default:
-		log.Println("Regular email received")
-	}
-}
-
-// Example helper function for sending urgent notifications
-func (ew *EmailWatcher) sendUrgentNotification(from, subject string) {
-	// Placeholder for sending urgent notifications
-	// In a real-world scenario, you might:
-	// - Send an SMS
-	// - Push notification to a mobile app
-	// - Send a Slack/Discord message
-	log.Printf("URGENT: Email from %s with subject '%s' requires immediate attention!", from, subject)
 }
 
 func main() {
-	// Create email watcher
-	watcher, err := newEmailWatcher()
-	if err != nil {
-		log.Fatalf("Failed to create email watcher: %v", err)
+	// Get client ID from environment
+	clientID := os.Getenv("GOOGLE_CLIENT_ID")
+	clientSecret := os.Getenv("GOOGLE_CLIENT_SECRET")
+
+	// Validate environment variables
+	if clientID == "" || clientSecret == "" {
+		log.Fatalf("Missing GOOGLE_CLIENT_ID or GOOGLE_CLIENT_SECRET in environment")
 	}
 
+	// OAuth 2.0 configuration
+	config := &oauth2.Config{
+		ClientID:     clientID,
+		ClientSecret: clientSecret,
+		Scopes:       []string{gmail.GmailModifyScope},
+		Endpoint:     google.Endpoint,
+		RedirectURL:  "urn:ietf:wg:oauth:2.0:oob",
+	}
+
+	// Create email watcher
+	watcher := NewEmailWatcher(config, &http.Client{})
+
 	// Authenticate
-	if err := watcher.authenticate(); err != nil {
+	ctx := context.Background()
+	if err := watcher.authenticate(ctx); err != nil {
 		log.Fatalf("Authentication error: %v", err)
 	}
 
-	// Start watching emails
+	// Watch emails
 	log.Println("Starting email watcher. Press Ctrl+C to stop.")
-	if err := watcher.watchEmails(); err != nil {
+	if err := watcher.watchEmails(ctx); err != nil {
 		log.Fatalf("Error watching emails: %v", err)
 	}
 }
