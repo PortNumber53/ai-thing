@@ -193,11 +193,12 @@ func (ew *EmailWatcher) watchEmails(ctx context.Context) error {
 
 		// List unread messages
 		user := "me"
-		listCall := ew.srv.Users.Messages.List(user).Q(fmt.Sprintf("is:unread after:%d", ew.lastProcessedTime.Unix()))
+		query := fmt.Sprintf("is:unread after:%d", ew.lastProcessedTime.Unix())
+		listCall := ew.srv.Users.Messages.List(user).Q(query)
 		
 		r, err := listCall.Do()
 		if err != nil {
-			return fmt.Errorf("unable to retrieve messages: %v", err)
+			return fmt.Errorf("unable to retrieve messages for user %s with query %q: %w", user, query, err)
 		}
 
 		processedCount := 0
