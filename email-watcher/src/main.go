@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/joho/godotenv"
@@ -15,6 +16,7 @@ import (
 	"golang.org/x/oauth2/google"
 	"google.golang.org/api/gmail/v1"
 	"google.golang.org/api/option"
+	"os/signal"
 )
 
 type EmailWatcher struct {
@@ -170,68 +172,95 @@ func (ew *EmailWatcher) authenticate(ctx context.Context) error {
 }
 
 func (ew *EmailWatcher) watchEmails(ctx context.Context) error {
-	// Check if Gmail service is initialized
-	if ew.srv == nil {
-		return fmt.Errorf("Gmail service is not initialized. Please authenticate first")
-	}
+	// Create a channel to handle interrupts
+	interrupt := make(chan os.Signal, 1)
+	signal.Notify(interrupt, os.Interrupt, syscall.SIGTERM)
 
-	if err := ew.loadLastProcessedTime(); err != nil {
-		log.Printf("Error loading last processed time: %v", err)
-		return err
-	}
+	// Create a ticker to periodically check for new emails
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
 
-	// List unread messages
-	user := "me"
-	listCall := ew.srv.Users.Messages.List(user).Q(fmt.Sprintf("is:unread after:%d", ew.lastProcessedTime.Unix()))
-	
-	r, err := listCall.Do()
-	if err != nil {
-		return fmt.Errorf("unable to retrieve messages: %v", err)
-	}
-
-	processedCount := 0
-	lastProcessedTime := ew.lastProcessedTime
-
-	for _, m := range r.Messages {
-		msg, err := ew.srv.Users.Messages.Get(user, m.Id).Do()
-		if err != nil {
-			log.Printf("Error getting message %s: %v", m.Id, err)
-			continue
+	for {
+		// Check if Gmail service is initialized
+		if ew.srv == nil {
+			return fmt.Errorf("Gmail service is not initialized. Please authenticate first")
 		}
 
-		from := ""
-		subject := ""
-		for _, header := range msg.Payload.Headers {
-			switch header.Name {
-			case "From":
-				from = header.Value
-			case "Subject":
-				subject = header.Value
+		if err := ew.loadLastProcessedTime(); err != nil {
+			log.Printf("Error loading last processed time: %v", err)
+			return err
+		}
+
+		// List unread messages
+		user := "me"
+		listCall := ew.srv.Users.Messages.List(user).Q(fmt.Sprintf("is:unread after:%d", ew.lastProcessedTime.Unix()))
+		
+		r, err := listCall.Do()
+		if err != nil {
+			return fmt.Errorf("unable to retrieve messages: %v", err)
+		}
+
+		processedCount := 0
+		lastProcessedTime := ew.lastProcessedTime
+
+		for _, m := range r.Messages {
+			// Fetch the full message details
+			msg, err := ew.srv.Users.Messages.Get(user, m.Id).Do()
+			if err != nil {
+				log.Printf("Error fetching message details: %v", err)
+				continue
+			}
+
+			// Extract sender and subject
+			from := ""
+			subject := ""
+			for _, header := range msg.Payload.Headers {
+				if header.Name == "From" {
+					from = header.Value
+				}
+				if header.Name == "Subject" {
+					subject = header.Value
+				}
+			}
+
+			// Process the message
+			ew.processMessage(from, subject)
+			processedCount++
+
+			// Update last processed time
+			msgTime := time.Unix(msg.InternalDate/1000, 0)
+			if msgTime.After(lastProcessedTime) {
+				lastProcessedTime = msgTime
+			}
+
+			// Mark message as read
+			_, err = ew.srv.Users.Messages.Modify(user, m.Id, &gmail.ModifyMessageRequest{
+				RemoveLabelIds: []string{"UNREAD"},
+			}).Do()
+			if err != nil {
+				log.Printf("Error marking message as read: %v", err)
 			}
 		}
 
-		// Process message
-		ew.processMessage(from, subject)
-		processedCount++
+		// Save the latest processed time
+		if err := ew.saveLastProcessedTime(lastProcessedTime); err != nil {
+			log.Printf("Error saving last processed time: %v", err)
+		}
 
-		// Mark as read: Using GmailModifyScope to remove UNREAD label
-		// This is the minimal required modification to track processed emails
-		// and prevent reprocessing the same emails in future runs
-		_, err = ew.srv.Users.Messages.Modify(user, m.Id, &gmail.ModifyMessageRequest{
-			RemoveLabelIds: []string{"UNREAD"},
-		}).Do()
-		if err != nil {
-			log.Printf("Error marking message as read: %v", err)
+		if processedCount > 0 {
+			log.Printf("Processed %d new email(s)", processedCount)
+		}
+
+		// Wait for either the next ticker interval or an interrupt
+		select {
+		case <-ticker.C:
+			// Continue to next iteration to check for emails
+			continue
+		case <-interrupt:
+			log.Println("Interrupt received, stopping email watcher")
+			return nil
 		}
 	}
-
-	// Save the latest processed time
-	if err := ew.saveLastProcessedTime(lastProcessedTime); err != nil {
-		log.Printf("Error saving last processed time: %v", err)
-	}
-
-	log.Printf("Processed %d new email(s)", processedCount)
-	return nil
 }
 
 func (ew *EmailWatcher) processMessage(from, subject string) {
