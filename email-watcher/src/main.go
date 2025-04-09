@@ -40,8 +40,8 @@ func (ew *EmailWatcher) loadLastProcessedTime() error {
 	}
 	
 	tokenDir := filepath.Join(configDir, "ai-thing", "tokens")
-	if err := os.MkdirAll(tokenDir, 0700); err != nil {
-		return err
+if err := os.MkdirAll(tokenDir, 0700); err != nil {
+		return fmt.Errorf("could not create token directory: %w", err)
 	}
 
 	lastProcessedFile := filepath.Join(tokenDir, "last_processed_time.json")
