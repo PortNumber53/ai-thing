@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
@@ -20,12 +19,19 @@ type EmailWatcher struct {
 	service *gmail.Service
 	config  *oauth2.Config
 	token   *oauth2.Token
+	lastProcessedEmailID string
 }
 
 const (
 	tokenFileName = "gmail_token.json"
 	tokenSubdir   = ".config/ai-thing/tokens"
+	lastEmailIDFileName = "last_processed_email.json"
 )
+
+// Structure to save last processed email ID
+type LastProcessedEmail struct {
+	EmailID string `json:"email_id"`
+}
 
 func getTokenFilePath() (string, error) {
 	// Preferred location: ~/.config/ai-thing/tokens/gmail_token.json
@@ -174,44 +180,121 @@ func (ew *EmailWatcher) authenticate() error {
 	return nil
 }
 
+func (ew *EmailWatcher) saveLastProcessedEmailID(emailID string) error {
+	// Get the file path for storing last processed email ID
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("could not get home directory: %v", err)
+	}
+	filePath := filepath.Join(homeDir, tokenSubdir, lastEmailIDFileName)
+
+	// Ensure the directory exists
+	if err := os.MkdirAll(filepath.Dir(filePath), 0700); err != nil {
+		return fmt.Errorf("could not create directory: %v", err)
+	}
+
+	// Create the struct to save
+	lastEmail := LastProcessedEmail{EmailID: emailID}
+
+	// Marshal to JSON
+	jsonData, err := json.MarshalIndent(lastEmail, "", "  ")
+	if err != nil {
+		return fmt.Errorf("could not marshal last email ID: %v", err)
+	}
+
+	// Write to file
+	if err := os.WriteFile(filePath, jsonData, 0600); err != nil {
+		return fmt.Errorf("could not write last email ID file: %v", err)
+	}
+
+	return nil
+}
+
+func (ew *EmailWatcher) loadLastProcessedEmailID() (string, error) {
+	// Get the file path for last processed email ID
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("could not get home directory: %v", err)
+	}
+	filePath := filepath.Join(homeDir, tokenSubdir, lastEmailIDFileName)
+
+	// Read the file
+	fileData, err := os.ReadFile(filePath)
+	if err != nil {
+		// If file doesn't exist, it's not an error - just return empty string
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", fmt.Errorf("could not read last email ID file: %v", err)
+	}
+
+	// Unmarshal the JSON
+	var lastEmail LastProcessedEmail
+	if err := json.Unmarshal(fileData, &lastEmail); err != nil {
+		return "", fmt.Errorf("could not parse last email ID: %v", err)
+	}
+
+	return lastEmail.EmailID, nil
+}
+
 func (ew *EmailWatcher) watchEmails() error {
-	// Start a loop to periodically check for new emails
-	for {
-		// List recent emails
-		user := "me"
-		r, err := ew.service.Users.Messages.List(user).Q("is:unread").Do()
+	// Load the last processed email ID
+	lastProcessedEmailID, err := ew.loadLastProcessedEmailID()
+	if err != nil {
+		log.Printf("Warning: Could not load last processed email ID: %v", err)
+	}
+
+	// List unread messages
+	user := "me"
+	r, err := ew.service.Users.Messages.List(user).Q("is:unread").Do()
+	if err != nil {
+		return fmt.Errorf("unable to retrieve messages: %v", err)
+	}
+
+	// Process only new messages
+	newMessagesProcessed := 0
+	for _, m := range r.Messages {
+		// Skip if this message has already been processed
+		if m.Id == lastProcessedEmailID {
+			break
+		}
+
+		// Fetch full message details
+		msg, err := ew.service.Users.Messages.Get(user, m.Id).Do()
 		if err != nil {
-			log.Printf("Error listing messages: %v", err)
-			time.Sleep(5 * time.Minute)
+			log.Printf("Error fetching message %s: %v", m.Id, err)
 			continue
 		}
 
-		// Process each unread message
-		for _, m := range r.Messages {
-			msg, err := ew.service.Users.Messages.Get(user, m.Id).Format("full").Do()
-			if err != nil {
-				log.Printf("Error getting message: %v", err)
-				continue
+		// Extract sender and subject
+		var from, subject string
+		for _, header := range msg.Payload.Headers {
+			switch header.Name {
+			case "From":
+				from = header.Value
+			case "Subject":
+				subject = header.Value
 			}
-
-			// Extract headers
-			var from, subject string
-			for _, header := range msg.Payload.Headers {
-				switch header.Name {
-				case "From":
-					from = header.Value
-				case "Subject":
-					subject = header.Value
-				}
-			}
-
-			// Process message
-			ew.processMessage(from, subject)
 		}
 
-		// Wait before checking again
-		time.Sleep(5 * time.Minute)
+		// Process the message
+		ew.processMessage(from, subject)
+
+		// Update last processed email ID after successful processing
+		if err := ew.saveLastProcessedEmailID(m.Id); err != nil {
+			log.Printf("Warning: Could not save last processed email ID: %v", err)
+		}
+
+		newMessagesProcessed++
 	}
+
+	if newMessagesProcessed == 0 {
+		log.Println("No new unread emails")
+	} else {
+		log.Printf("Processed %d new email(s)", newMessagesProcessed)
+	}
+
+	return nil
 }
 
 func (ew *EmailWatcher) processMessage(from, subject string) {
