@@ -129,9 +129,13 @@ func (ew *EmailWatcher) authenticate(ctx context.Context) error {
 					log.Printf("Insufficient token permissions: %v", err)
 					token = nil
 				} else {
-					// Token is valid, save it and return
+					// Token is valid, save it and update service
 					ew.srv = srv
-					return saveToken(token)
+					err = saveToken(token)
+					if err != nil {
+						log.Printf("Warning: Could not save token: %v", err)
+					}
+					return nil
 				}
 			}
 		}
