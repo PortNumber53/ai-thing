@@ -12,3 +12,6 @@ Requests
 scikit_learn
 sentence_transformers
 python-dotenv
+google-generativeai>=0.3.0
+google-cloud-aiplatform>=1.38.0
+geopy==2.4.1
