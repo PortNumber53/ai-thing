@@ -19,17 +19,6 @@ class AgentState:
     iteration: int = 0
     max_iterations: int = 3
 
-@dataclass
-class AgentState:
-    """State shared across all nodes in the graph"""
-    query: str = ""
-    context: str = ""
-    analysis: str = ""
-    response: str = ""
-    next_action: str = ""
-    iteration: int = 0
-    max_iterations: int = 3
-
 class GraphAIAgent:
     def __init__(self, api_key: str = None, model: str = "gemini-1.5-flash"):
         """
