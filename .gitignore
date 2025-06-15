@@ -25,3 +25,9 @@ Homestead.yaml
 Homestead.json
 /.vagrant
 .phpunit.result.cache
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
