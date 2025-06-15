@@ -170,6 +170,9 @@ class GoogleAIIntegration:
             "When a user asks for an action that can be performed by a tool, "
             "you MUST respond with a tool call in the specified JSON format. "
             "Do not add any explanatory text before or after the tool call itself. "
+            "If a query requires multiple steps or information from multiple tools, "
+            "you can make a sequence of tool calls. After each tool call, I will provide you with the result, "
+            "and you can then decide if another tool call is needed or if you can now answer the user's query. "
             "If you are unsure or the action cannot be performed by a tool, respond naturally."
         )
 
@@ -344,88 +347,16 @@ class GoogleAIIntegration:
             # Fallback to a simple text response if the function call fails
             return chat.send_message(f"Error in {function_name or 'unknown'}: {error_msg}")
 
-    def process_tool_call(self, function_call: Any, chat_session: Any) -> str:
+    def chat(self, prompt: str, max_tool_calls: int = 5) -> str:
         """
-        Process a function call from the model, execute the tool, and return the model's
-        textual response after consuming the tool's output.
+        Process a user's message and return the model's response, supporting multi-turn tool calls.
 
         Args:
-            function_call: The function call object from the model (e.g., part.function_call).
-            chat_session: The active chat session with the model.
+            prompt: The user's message.
+            max_tool_calls: Maximum number of consecutive tool calls allowed.
 
         Returns:
-            The model's final text response after the tool interaction.
-        """
-        try:
-            tool_name = function_call.name
-            tool_args = self._extract_args_from_proto(function_call.args)
-
-            print(f"\n[AI] Tool requested: {tool_name} with args: {tool_args}")
-
-            tool_instance = self.tools.get(tool_name)
-            tool_response_content = None
-
-            if tool_instance and hasattr(tool_instance, 'execute'):
-                try:
-                    tool_response_content = tool_instance.execute(**tool_args)
-                    print(f"[DEBUG] Tool {tool_name} raw response: {tool_response_content}")
-                except Exception as e:
-                    error_msg = f"Error executing tool {tool_name}: {str(e)}"
-                    print(f"\n[ERROR] {error_msg}")
-                    traceback.print_exc()
-                    tool_response_content = {'error': error_msg}
-            else:
-                error_msg = f"Unknown or non-executable tool: {tool_name}"
-                print(f"\n[ERROR] {error_msg}")
-                # It's important to send a response back to the model even if the tool is unknown
-                tool_response_content = {'error': error_msg}
-
-            # Send the tool's response (success or error) back to the model using dictionary format
-            model_response_after_tool = chat_session.send_message(
-                [{
-                    'function_response': {
-                        'name': tool_name,
-                        'response': tool_response_content
-                    }
-                }],
-                stream=False
-            )
-
-            # The model's response to the function_response should be text
-            final_text = ""
-            if model_response_after_tool.candidates and model_response_after_tool.candidates[0].content and model_response_after_tool.candidates[0].content.parts:
-                final_text = "".join(p.text for p in model_response_after_tool.candidates[0].content.parts if hasattr(p, 'text')).strip()
-            elif hasattr(model_response_after_tool, 'text'): # Fallback
-                final_text = model_response_after_tool.text
-
-            if not final_text:
-                final_text = "(Tool executed, but model provided no further text response.)"
-                print("[WARN] Model provided no text after tool execution.")
-
-            return final_text
-
-        except Exception as e:
-            error_msg = f"Critical error in process_tool_call for '{getattr(function_call, 'name', 'unknown_tool')}': {str(e)}"
-            print(f"\n[ERROR] {error_msg}")
-            print(f"\n[ERROR] Details: {traceback.format_exc()}")
-            # Try to send a structured error back to the model if possible
-            # This uses the _send_function_error helper which should be defined elsewhere
-            # or implemented here if it's simple enough.
-            # For now, returning a simple error string to the user if _send_function_error is complex.
-            # return f"Error processing tool: {str(e)}" # This would go to the end user directly
-            # Let's assume _send_function_error exists and handles sending error to model via chat_session
-            current_fn_name = getattr(function_call, 'name', 'unknown_tool_in_exception')
-            return self._send_function_error(chat_session, current_fn_name, error_msg)
-
-    def chat(self, prompt: str) -> str:
-        """
-        Process a user's message and return the model's response.
-
-        Args:
-            prompt: The user's message
-
-        Returns:
-            The model's final response
+            The model's final response.
         """
         print(f"\n[User] {prompt}")
 
@@ -434,93 +365,151 @@ class GoogleAIIntegration:
             parts = prompt.strip().split()
             if len(parts) == 2:
                 help_tool_name = parts[1]
-                tool_instance = self.tools.get(help_tool_name)
+                tool_instance = None
+                # Iterate to find tool by its defined function name
+                for t_inst in self.tools.values():
+                    if hasattr(t_inst, 'get_definition'):
+                        tool_def = t_inst.get_definition()
+                        if tool_def and tool_def.get('function_declarations'):
+                            func_name = tool_def['function_declarations'][0].get('name')
+                            if func_name == help_tool_name:
+                                tool_instance = t_inst
+                                break
                 if tool_instance and hasattr(tool_instance, 'get_help'):
                     return f"[Help for {help_tool_name}]\n{tool_instance.get_help()}"
                 else:
-                    available_tools_str = ', '.join(self.tools.keys()) if self.tools else 'None'
-                    return f"Sorry, I couldn't find help for '{help_tool_name}'. Available tools are: {available_tools_str}."
+                    available_tools_str = ', '.join(
+                        t.get_definition()['function_declarations'][0]['name']
+                        for t in self.tools.values() if hasattr(t, 'get_definition') and
+                        t.get_definition().get('function_declarations') and
+                        t.get_definition()['function_declarations'][0].get('name')
+                    )
+                    return f"Sorry, I couldn't find help for '{help_tool_name}'. Available tools are: {available_tools_str if available_tools_str else 'None'}."
             else:
                 return "Usage: /help <tool_name>\nExample: /help get_weather"
 
         try:
             if self.chat_session is None:
                 model = self.initialize_model()
+                # Start chat with an empty history, system instruction is part of the model
                 self.chat_session = model.start_chat(history=[])
 
             chat_session = self.chat_session
+            current_prompt_or_tool_response: Union[str, List[Part]] = prompt
+            tool_call_count = 0
 
-            # Send the message to the model
-            # Disabling automatic function calling as we handle it manually for more control
-            response = chat_session.send_message(
-                prompt,
-                generation_config={'temperature': 0.2}, # Example config
-                # safety_settings=self._get_safety_settings(), # Already set in model init
-                # tools are already part of the model from initialize_model()
-            )
+            while tool_call_count < max_tool_calls:
+                print(f"[DEBUG] Sending to model (Loop {tool_call_count + 1}): {current_prompt_or_tool_response}")
 
-            # Check for structured function call from the model
-            if response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
-                for part in response.candidates[0].content.parts:
-                    if hasattr(part, 'function_call') and part.function_call:
-                        # Process the structured function call
-                        return self.process_tool_call(part.function_call, chat_session)
+                # Ensure current_prompt_or_tool_response is in the correct format for send_message
+                # If it's a string, it's a user prompt. If it's a list of Parts (for tool response), it's already formatted.
+                message_content = current_prompt_or_tool_response
+                if isinstance(current_prompt_or_tool_response, str):
+                    # For a direct string prompt, ensure it's correctly passed.
+                    # The history is managed by the chat_session object itself.
+                    pass # String is fine as is for the first turn or if model responds with text
 
-            # If no structured function call, extract direct text response
-            response_text = ""
-            if response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
-                response_text = "".join(p.text for p in response.candidates[0].content.parts if hasattr(p, 'text')).strip()
-
-            if not response_text: # Fallback if parts didn't yield text
-                if hasattr(response, 'text') and response.text:
-                    response_text = response.text # This might be the case for some simpler models/responses
-                elif response.candidates and response.candidates[0].finish_reason == 'STOP' and not response_text:
-                    response_text = "(Model generated no text content before stopping)"
-                else:
-                    finish_reason = response.candidates[0].finish_reason if (response.candidates and len(response.candidates) > 0) else 'N/A'
-                    response_text = f"(No textual response. Finish reason: {finish_reason})"
-
-            print(f"\n[DEBUG] Direct response text (no structured tool call or after fallback): {response_text}")
-
-            # Fallback: Check for manually formatted tool call in the response text (e.g., /tool ...)
-            manual_tool_call_data = self._extract_tool_call(response_text)
-            if manual_tool_call_data:
-                print(f"[DEBUG] Extracted manual tool call from text: {manual_tool_call_data}")
-
-                args_struct = Struct()
-                if isinstance(manual_tool_call_data.get('args'), dict):
-                    for k, v_val in manual_tool_call_data['args'].items():
-                        val_obj = Value()
-                        # Basic type handling for Struct, can be expanded
-                        if isinstance(v_val, str):
-                            val_obj.string_value = v_val
-                        elif isinstance(v_val, (int, float)):
-                            val_obj.number_value = v_val
-                        elif isinstance(v_val, bool):
-                            val_obj.bool_value = v_val
-                        # else: # Could handle lists/nested structs if needed
-                        #     val_obj.string_value = str(v_val) # Default to string
-                        args_struct.fields[k].CopyFrom(val_obj)
-
-                # Mimic genai.types.FunctionCall structure for process_tool_call
-                class MockGeminiFunctionCall:
-                    def __init__(self, name, arguments_struct):
-                        self.name = name
-                        self.args = arguments_struct
-
-                mock_call = MockGeminiFunctionCall(
-                    name=manual_tool_call_data['name'],
-                    arguments_struct=args_struct
+                response = chat_session.send_message(
+                    message_content,
+                    generation_config={'temperature': 0.2}
                 )
-                try:
-                    return self.process_tool_call(mock_call, chat_session)
-                except Exception as e:
-                    error_msg = f"Error processing manual tool call '{mock_call.name}': {str(e)}"
-                    print(f"\n[ERROR] {error_msg}")
-                    traceback.print_exc()
-                    return self._send_function_error(chat_session, mock_call.name, error_msg)
 
-            return response_text
+                function_call_to_process = None
+                # Check for structured function call from the model
+                if response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
+                    for part_content in response.candidates[0].content.parts:
+                        if hasattr(part_content, 'function_call') and part_content.function_call:
+                            function_call_to_process = part_content.function_call
+                            break # Process first function call found
+
+                if function_call_to_process:
+                    tool_call_count += 1
+                    tool_name = function_call_to_process.name
+                    tool_args = self._extract_args_from_proto(function_call_to_process.args)
+                    print(f"\n[AI] Tool requested: {tool_name} with args: {tool_args}")
+
+                    tool_instance = self.tools.get(tool_name)
+                    tool_response_content_dict: Dict[str, Any] = {}
+
+                    if tool_instance and hasattr(tool_instance, 'execute'):
+                        try:
+                            # Tool execute method should return a dictionary
+                            tool_output = tool_instance.execute(**tool_args)
+                            if not isinstance(tool_output, dict):
+                                print(f"[WARN] Tool {tool_name} did not return a dict. Wrapping: {tool_output}")
+                                tool_response_content_dict = {"result": str(tool_output)}
+                            else:
+                                tool_response_content_dict = tool_output
+                            print(f"[DEBUG] Tool {tool_name} executed. Response: {tool_response_content_dict}")
+                        except Exception as e:
+                            error_msg = f"Error executing tool {tool_name}: {str(e)}"
+                            print(f"\n[ERROR] {error_msg}")
+                            traceback.print_exc()
+                            tool_response_content_dict = {'error': error_msg}
+                    else:
+                        error_msg = f"Unknown or non-executable tool: {tool_name}"
+                        print(f"\n[ERROR] {error_msg}")
+                        tool_response_content_dict = {'error': error_msg}
+
+                    # Prepare the tool response to send back to the model
+                    # It must be a list of Part objects (TypedDicts)
+                    current_prompt_or_tool_response = [
+                        Part(function_response={'name': tool_name, 'response': tool_response_content_dict})
+                    ]
+                    # Continue loop to let model process tool response
+                    continue
+                else:
+                    # No function call, extract direct text response
+                    response_text = ""
+                    if response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
+                        response_text = "".join(p.text for p in response.candidates[0].content.parts if hasattr(p, 'text')).strip()
+
+                    if not response_text: # Fallback
+                        if hasattr(response, 'text') and response.text:
+                            response_text = response.text
+                        elif response.candidates and response.candidates[0].finish_reason == 'STOP' and not response.text:
+                            response_text = "(Model generated no text content before stopping)"
+                        else:
+                            finish_reason_str = str(response.candidates[0].finish_reason) if (response.candidates and response.candidates[0].finish_reason) else 'N/A'
+                            response_text = f"(No textual response. Finish reason: {finish_reason_str})"
+
+                    print(f"\n[AI] {response_text}")
+                    return response_text # End of conversation or final answer
+
+            # Max tool calls reached. Send the last tool response to the model to get a final summary.
+            if tool_call_count >= max_tool_calls:
+                print(f"[WARN] Maximum tool call limit ({max_tool_calls}) reached. Sending last tool response for a final summary.")
+
+                # Send the last tool's response to the model
+                response = chat_session.send_message(
+                    current_prompt_or_tool_response,
+                    generation_config={'temperature': 0.2}
+                )
+
+                # Try to extract a final text response
+                response_text = ""
+                function_call_in_final_response = None
+
+                if response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
+                    for part in response.candidates[0].content.parts:
+                        if hasattr(part, 'text') and part.text:
+                            response_text += part.text
+                        if hasattr(part, 'function_call') and part.function_call:
+                            function_call_in_final_response = part.function_call
+
+                response_text = response_text.strip()
+
+                if response_text:
+                    print(f"\n[AI] {response_text}")
+                    return response_text
+                elif function_call_in_final_response:
+                    final_response = f"(Task ended after reaching tool call limit. The model wanted to perform one more action: call `{function_call_in_final_response.name}`.)"
+                    print(f"\n[AI] {final_response}")
+                    return final_response
+                else:
+                    final_response = "(Task completed, but model provided no final summary after reaching tool call limit.)"
+                    print(f"\n[AI] {final_response}")
+                    return final_response
 
         except Exception as e:
             error_msg = f"An error occurred in the chat method: {str(e)}"
@@ -539,7 +528,8 @@ def main():
             # "What's the weather like in Tokyo today?",
             # "How about San Francisco, in fahrenheit?",
             # "Show me the contents of the file '/home/grimlock/tmp/snake_game.html'",
-            "Write a joke about computers to this file '/home/grimlock/tmp/computer_joke.txt'"
+            # "Write a joke about computers to this file '/home/grimlock/tmp/computer_joke.txt'",
+            "What are the temperatures in the locations listed in the '/home/grimlock/tmp/locations.txt', write the response to '/home/grimlock/tmp/temps.txt'",
             # "Please make the snake of the game be made of circles instead of squares, the file is '/home/grimlock/tmp/snake_game.html'"
             # "Tell me a joke about computers."
         ]
@@ -547,7 +537,7 @@ def main():
         for query in queries:
             print("\n" + "="*50)
             print(f"[Query] {query}")
-            response = ai.chat(query)
+            response = ai.chat(query, max_tool_calls=10)
             print(f"[Response] {response}")
 
     except Exception as e:
