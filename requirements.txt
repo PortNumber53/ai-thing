@@ -1,6 +1,6 @@
 crewai==0.130.0
 crewai[tools]
-fletype==1.2.0
+filetype==1.2.0
 langchain==0.3.25
 langchain_core==0.3.65
 langchain-community==0.3.25

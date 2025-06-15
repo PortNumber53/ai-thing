@@ -4,16 +4,15 @@ import configparser
 import traceback
 from pathlib import Path
 import google.generativeai as genai
+from google.generativeai.types import HarmCategory, HarmBlockThreshold
 from typing import Dict, Any, Optional, List, Union, Literal, TypedDict
+from tools.weather_tool import WeatherTool
+from google.protobuf.struct_pb2 import Value, Struct # For manual tool call mocking
 
 # Type definitions for function calling
 class FunctionCall(TypedDict):
     name: str
     args: Dict[str, Any]
-
-class FunctionResponse(TypedDict):
-    name: str
-    response: Dict[str, Any]
 
 # Tool definition type
 class Tool(TypedDict):
@@ -30,6 +29,13 @@ class GoogleAIIntegration:
     A class to handle Google AI Studio and Vertex AI integrations.
     Supports function calling with Gemini models.
     """
+    # Define safety settings as a class-level constant
+    SAFETY_SETTINGS_CONFIG = [
+        {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+    ]
 
     def __init__(self, model_name: str = "gemini-1.5-pro-latest"):
         """
@@ -40,6 +46,7 @@ class GoogleAIIntegration:
         """
         self.model_name = model_name
         self._configure_gemini()
+        self.weather_tool = WeatherTool(user_agent=f"google_ai_integration/{self.model_name}")
 
     def _get_secrets_path(self) -> Path:
         """Get the path to the secrets.ini file."""
@@ -103,128 +110,9 @@ class GoogleAIIntegration:
                 "model = gemini-1.5-pro-latest  # optional"
             ) from e
 
-    def get_weather(self, location: str, unit: str = "celsius") -> str:
-        """
-        Get weather information from Open-Meteo API.
-
-        Args:
-            location: The location to get weather for (city name or coordinates)
-            unit: The temperature unit (celsius or fahrenheit)
-
-        Returns:
-            JSON string with weather information
-        """
-        import requests
-        from geopy.geocoders import Nominatim
-
-        try:
-            # Initialize geocoder
-            geolocator = Nominatim(user_agent="google_ai_integration")
-
-            # Get location coordinates
-            location_data = geolocator.geocode(location)
-            if not location_data:
-                return json.dumps({
-                    "location": location,
-                    "error": "Could not find coordinates for the specified location."
-                })
-
-            # Convert unit to Open-Meteo format, default to celsius if not provided
-            temperature_unit = "celsius"
-            if unit and unit.lower() in ['celsius', 'fahrenheit']:
-                temperature_unit = unit.lower()
-
-            # Build the API URL
-            base_url = "https://api.open-meteo.com/v1/forecast"
-            params = {
-                "latitude": location_data.latitude,
-                "longitude": location_data.longitude,
-                "current": ["temperature_2m", "wind_speed_10m", "relative_humidity_2m", "weather_code"],
-                "hourly": ["temperature_2m", "relative_humidity_2m", "wind_speed_10m", "weather_code"],
-                "temperature_unit": temperature_unit,
-                "wind_speed_unit": "kmh",
-                "timezone": "auto",
-                "forecast_days": 1
-            }
-
-            # Make the API request
-            response = requests.get(base_url, params=params)
-            response.raise_for_status()
-            data = response.json()
-
-            # Format the response
-            result = {
-                "location": f"{location_data.address}",
-                "coordinates": {
-                    "latitude": location_data.latitude,
-                    "longitude": location_data.longitude
-                },
-                "current": data.get("current", {}),
-                "hourly_forecast": {
-                    "time": data.get("hourly", {}).get("time", [])[:24],  # Next 24 hours
-                    "temperature_2m": data.get("hourly", {}).get("temperature_2m", [])[:24],
-                    "relative_humidity_2m": data.get("hourly", {}).get("relative_humidity_2m", [])[:24],
-                    "wind_speed_10m": data.get("hourly", {}).get("wind_speed_10m", [])[:24],
-                    "weather_code": data.get("hourly", {}).get("weather_code", [])[:24]
-                },
-                "unit": {
-                    "temperature": temperature_unit,
-                    "wind_speed": "km/h"
-                }
-            }
-
-            return json.dumps(result, indent=2)
-
-        except requests.exceptions.RequestException as e:
-            return json.dumps({
-                "location": location,
-                "error": f"Failed to fetch weather data: {str(e)}"
-            })
-        except Exception as e:
-            import traceback
-            return json.dumps({
-                "location": location,
-                "error": f"An error occurred: {str(e)}",
-                "traceback": traceback.format_exc()
-            })
-
-    def _get_weather_tool(self) -> dict:
-        """
-        Get the weather tool definition for Gemini.
-
-        Returns:
-            dict: The tool definition
-        """
-        return {
-            'function_declarations': [{
-                'name': 'get_weather',
-                'description': 'Get the current weather and forecast for a given location using Open-Meteo API.',
-                'parameters': {
-                    'type': 'OBJECT',
-                    'properties': {
-                        'location': {
-                            'type': 'STRING',
-                            'description': 'The city name, address, or coordinates (e.g., "New York, NY" or "40.7128,-74.0060")'
-                        },
-                        'unit': {
-                            'type': 'STRING',
-                            'enum': ['celsius', 'fahrenheit'],
-                            'description': 'The unit for temperature, either celsius or fahrenheit. Default is celsius.'
-                        }
-                    },
-                    'required': ['location']
-                }
-            }]
-        }
-
     def _get_safety_settings(self) -> list[dict]:
-        """Define safety settings for the model."""
-        return [
-            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-        ]
+        """Returns the safety settings for the model."""
+        return self.SAFETY_SETTINGS_CONFIG
 
     def _get_system_instruction(self) -> str:
         """
@@ -233,35 +121,30 @@ class GoogleAIIntegration:
         Returns:
             str: The system instruction
         """
-        return """You are a helpful AI assistant with access to weather information.
+        base_prompt = "You are a helpful AI assistant. You have access to the following tools:"
 
-        When the user asks about the weather, you MUST respond with a tool call in this exact format:
-        /tool get_weather({"location": "City Name"})
+        tool_instructions = []
+        # In the future, if you have multiple tools, you would iterate through them here.
+        # For now, we just have the weather tool.
+        if hasattr(self, 'weather_tool') and hasattr(self.weather_tool, 'get_invocation_instructions'):
+            tool_instructions.append(self.weather_tool.get_invocation_instructions())
 
-        Examples:
-        User: What's the weather like in Tokyo?
-        You: /tool get_weather({"location": "Tokyo"})
+        # Combine instructions
+        full_tool_instructions = "\n\n".join(tool_instructions)
 
-        User: What's the temperature in New York in Fahrenheit?
-        You: /tool get_weather({"location": "New York", "unit": "fahrenheit"})
+        # General instructions for after tool use, or non-tool queries
+        general_behavior = """For all other queries not related to the tools above, respond normally.
 
-        Important:
-        - The response MUST start with '/tool get_weather('
-        - The arguments MUST be valid JSON
-        - The 'location' parameter is REQUIRED
-        - The 'unit' parameter is optional (defaults to 'celsius')
-        - Do NOT include any other text when you want to execute a tool
-        - For all other queries, respond normally
-        - 'unit' is optional (default: 'celsius')
+When providing weather information (after a successful tool call), include relevant details like:
+- Current temperature and conditions
+- Wind speed and direction
+- Humidity levels
+- A brief forecast for the next few hours or the day
+- Any relevant weather alerts or warnings
 
-        When providing weather information, include relevant details like:
-        - Current temperature and conditions
-        - Wind speed and direction
-        - Humidity
-        - Any notable weather alerts or warnings
+Always be friendly and helpful!"""
 
-        If the location is ambiguous, ask for clarification.
-        """
+        return f"{base_prompt}\n\n{full_tool_instructions}\n\n{general_behavior}"
 
     def _extract_tool_call(self, text: str) -> Optional[dict]:
         """
@@ -297,7 +180,7 @@ class GoogleAIIntegration:
         # Create model with system instruction and tools
         model = genai.GenerativeModel(
             model_name=self.model_name,
-            tools=[self._get_weather_tool()],
+            tools=[self.weather_tool.get_definition()],
             safety_settings=self._get_safety_settings(),
             system_instruction=self._get_system_instruction()
         )
@@ -314,52 +197,43 @@ class GoogleAIIntegration:
         Returns:
             dict: The extracted arguments as a dictionary
         """
-        args = {}
+        extracted_args = {}
 
         try:
             print(f"[DEBUG] Extracting args from type: {type(args_proto)}")
-
             # Handle MapComposite type directly
-            if 'MapComposite' in str(type(args_proto)):
+            if hasattr(args_proto, 'items') and callable(args_proto.items): # For MapComposite from Gemini
                 print("[DEBUG] Processing MapComposite")
                 for key, value in args_proto.items():
-                    print(f"[DEBUG] Processing key: {key}, value: {value}")
-                    if hasattr(value, 'string_value'):
-                        args[key] = value.string_value
-                        print(f"[DEBUG] Extracted string: {key} = {value.string_value}")
-                    elif hasattr(value, 'number_value'):
-                        args[key] = value.number_value
-                        print(f"[DEBUG] Extracted number: {key} = {value.number_value}")
-                    elif hasattr(value, 'bool_value'):
-                        args[key] = value.bool_value
-                        print(f"[DEBUG] Extracted bool: {key} = {value.bool_value}")
-                    else:
-                        print(f"[DEBUG] Unhandled value type for {key}: {type(value)}")
+                    # Values from MapComposite.items() are already Python native types.
+                    print(f"[DEBUG] Processing key: {key}, value: {value} (type: {type(value)})")
+                    extracted_args[key] = value
             # Handle direct fields access
             elif hasattr(args_proto, 'fields'):
                 print("[DEBUG] Processing direct fields")
-                for key, value in args_proto.fields.items():
+                for key, value in args_proto.fields.items(): # type: ignore
                     print(f"[DEBUG] Processing field: {key} = {value}")
                     if hasattr(value, 'string_value'):
-                        args[key] = value.string_value
+                        extracted_args[key] = value.string_value
                         print(f"[DEBUG] Extracted string: {key} = {value.string_value}")
                     elif hasattr(value, 'number_value'):
-                        args[key] = value.number_value
+                        extracted_args[key] = value.number_value
                         print(f"[DEBUG] Extracted number: {key} = {value.number_value}")
                     elif hasattr(value, 'bool_value'):
-                        args[key] = value.bool_value
+                        extracted_args[key] = value.bool_value
                         print(f"[DEBUG] Extracted bool: {key} = {value.bool_value}")
                     else:
-                        print(f"[DEBUG] Unhandled value type for {key}: {type(value)}")
+                        print(f"[DEBUG] Unhandled field value type for {key}: {type(value)}")
+            else:
+                print(f"[DEBUG_WARN] args_proto is not a recognized type for extraction: {type(args_proto)}")
 
-            print(f"[DEBUG] Extracted args: {args}")
+            print(f"[DEBUG] Extracted args: {extracted_args}")
 
         except Exception as e:
-            print(f"[ERROR] Error extracting arguments: {str(e)}")
-            import traceback
+            print(f"[ERROR] Error extracting arguments: {e}")
             traceback.print_exc()
-
-        return args
+            # Depending on desired behavior, you might want to return empty dict or re-raise
+        return extracted_args
 
     def _extract_value_from_proto(self, value_proto):
         """Extract a single value from a protobuf Value."""
@@ -392,178 +266,86 @@ class GoogleAIIntegration:
         """Send an error message back to the model."""
         print(f"[ERROR] Sending function error: {function_name} - {error_msg}")
         try:
-            return chat.send_message({
-                'role': 'function',
-                'parts': [{
-                    'function_response': {
-                        'name': function_name or 'unknown',
-                        'response': {'error': error_msg}
-                    }
-                }]
-            })
+            # Send a structured error message back to the model using dictionary format
+            return chat.send_message([{
+                'function_response': {
+                    'name': function_name or 'unknown_tool_error',
+                    'response': {'error': error_msg}
+                }
+            }])
         except Exception as e:
             print(f"[ERROR] Failed to send error message: {str(e)}")
             # Fallback to a simple text response if the function call fails
             return chat.send_message(f"Error in {function_name or 'unknown'}: {error_msg}")
 
-    def process_tool_call(self, function_call: Any, chat: Any) -> Any:
+    def process_tool_call(self, function_call: Any, chat_session: Any) -> str:
         """
-        Process a function call from the model.
+        Process a function call from the model, execute the tool, and return the model's
+        textual response after consuming the tool's output.
 
         Args:
-            function_call: The function call from the model
-            chat: The chat session
+            function_call: The function call object from the model (e.g., part.function_call).
+            chat_session: The active chat session with the model.
 
         Returns:
-            The model's response after processing the function call
+            The model's final text response after the tool interaction.
         """
         try:
-            print(f"\n[DEBUG] Raw function call: {function_call}")
-            print(f"[DEBUG] Function call type: {type(function_call)}")
+            tool_name = function_call.name
+            tool_args = self._extract_args_from_proto(function_call.args)
 
-            # Debug: Print all attributes of the function call
-            print("[DEBUG] Function call attributes:", dir(function_call))
+            print(f"\n[AI] Tool requested: {tool_name} with args: {tool_args}")
 
-            # Extract function name
-            tool_name = None
-            if hasattr(function_call, 'name') and function_call.name:
-                tool_name = function_call.name
-            elif hasattr(function_call, 'function'):
-                tool_name = function_call.function
-                print(f"[DEBUG] Found function name in 'function' attribute: {tool_name}")
-
-            if not tool_name:
-                error_msg = "Could not determine function name from function call"
-                print(f"[ERROR] {error_msg}")
-                return self._send_function_error(chat, "unknown", error_msg)
-
-            print(f"[DEBUG] Processing tool call: {tool_name}")
-
-            # Extract arguments
-            tool_args = {}
-
-            # Handle dictionary args directly (from our MockFunctionCall)
-            if hasattr(function_call, 'args') and isinstance(function_call.args, dict):
-                tool_args = function_call.args
-                print(f"[DEBUG] Using direct dict args: {tool_args}")
-            # Handle protobuf args
-            elif hasattr(function_call, 'args'):
-                print(f"[DEBUG] Args type: {type(function_call.args)}")
-                print(f"[DEBUG] Args dir: {dir(function_call.args)}")
-
-                # Try to extract arguments using our improved method
-                tool_args = self._extract_args_from_proto(function_call.args)
-
-                # If we still don't have args, try direct access as a last resort
-                if not tool_args and hasattr(function_call.args, 'fields'):
-                    print("[DEBUG] Trying direct field access as fallback")
-                    for key, value in function_call.args.fields.items():
-                        print(f"[DEBUG] Processing field: {key} = {value}")
-                        if hasattr(value, 'string_value'):
-                            tool_args[key] = value.string_value
-                            print(f"[DEBUG]   Extracted string: {key} = {value.string_value}")
-                        elif hasattr(value, 'number_value'):
-                            tool_args[key] = value.number_value
-                            print(f"[DEBUG]   Extracted number: {key} = {value.number_value}")
-                        elif hasattr(value, 'bool_value'):
-                            tool_args[key] = value.bool_value
-                            print(f"[DEBUG]   Extracted bool: {key} = {value.bool_value}")
-                        else:
-                            print(f"[DEBUG]   Unhandled value type for {key}: {type(value)}")
-
-            # Try to get args from 'arguments' attribute as fallback
-            if not tool_args and hasattr(function_call, 'arguments') and function_call.arguments:
-                print("[DEBUG] Found 'arguments' attribute, trying to parse as JSON")
-                try:
-                    import json
-                    tool_args = json.loads(function_call.arguments)
-                    print(f"[DEBUG] Successfully parsed arguments: {tool_args}")
-                except Exception as e:
-                    print(f"[ERROR] Failed to parse arguments: {str(e)}")
-
-            print(f"[AI] Tool requested: {tool_name} with args: {tool_args}")
-
-            # Process the tool call
+            api_response_data = None
             if tool_name == 'get_weather':
-                return self._handle_weather_tool(tool_args, chat)
+                if hasattr(self, 'weather_tool'):
+                    api_response_data = self.weather_tool.execute(**tool_args)
+                    print(f"[DEBUG] Weather tool raw response: {api_response_data}")
+                else:
+                    error_msg = "Weather tool not initialized internally."
+                    print(f"[ERROR] {error_msg}")
+                    api_response_data = {'error': error_msg}
             else:
                 error_msg = f"Unknown tool: {tool_name}"
                 print(f"[ERROR] {error_msg}")
-                return self._send_function_error(chat, tool_name, error_msg)
+                api_response_data = {'error': error_msg}
 
-        except Exception as e:
-            error_msg = f"Error processing tool call: {str(e)}"
-            print(f"\n[ERROR] {error_msg}")
-            import traceback
-            traceback.print_exc()
-            return self._send_function_error(chat, tool_name if 'tool_name' in locals() else "unknown", error_msg)
-
-    def _handle_weather_tool(self, tool_args: dict, chat: Any) -> Any:
-        """
-        Handle the weather tool call.
-
-        Args:
-            tool_args: Dictionary containing the tool arguments
-            chat: The chat session
-
-        Returns:
-            The response from the weather API
-        """
-        try:
-            print(f"[DEBUG] Handling weather tool with args: {tool_args}")
-
-            # Extract location from args
-            location = tool_args.get('location')
-            if not location:
-                error_msg = "No location provided for weather check"
-                print(f"[ERROR] {error_msg}")
-                return self._send_function_error(chat, "get_weather", error_msg)
-
-            # Get weather data
-            weather_data = self.get_weather(location)
-
-            # Parse the weather data
-            weather_json = json.loads(weather_data)
-
-            # Create a structured response
-            current = weather_json['current']
-            response_data = {
-                'location': weather_json['location'],
-                'temperature': f"{current['temperature_2m']}°{weather_json['unit']['temperature']}",
-                'wind': f"{current['wind_speed_10m']} {weather_json['unit']['wind_speed']}",
-                'humidity': f"{current['relative_humidity_2m']}%"
-            }
-
-            print(f"[DEBUG] Weather response data: {response_data}")
-
-            # Format the tool response as a system message
-            system_message = (
-                f"Here's the tool response for the weather in {response_data['location']}:\n"
-                f"- Temperature: {response_data['temperature']}\n"
-                f"- Wind: {response_data['wind']}\n"
-                f"- Humidity: {response_data['humidity']}\n\n"
-                "Please provide a friendly and concise response to the user's original query "
-                "based on this weather information."
-            )
-
-            # Send the system message and get the model's response
-            model_response = chat.send_message(
-                content=system_message,
-                generation_config={
-                    'temperature': 0.2,
-                },
+            # Send the tool's response (success or error) back to the model using dictionary format
+            model_response_after_tool = chat_session.send_message(
+                [{
+                    'function_response': {
+                        'name': tool_name,
+                        'response': api_response_data
+                    }
+                }],
                 stream=False
             )
 
-            # Return the model's response text
-            return model_response.text
+            # The model's response to the function_response should be text
+            final_text = ""
+            if model_response_after_tool.candidates and model_response_after_tool.candidates[0].content and model_response_after_tool.candidates[0].content.parts:
+                final_text = "".join(p.text for p in model_response_after_tool.candidates[0].content.parts if hasattr(p, 'text')).strip()
+            elif hasattr(model_response_after_tool, 'text'): # Fallback
+                final_text = model_response_after_tool.text
+
+            if not final_text:
+                final_text = "(Tool executed, but model provided no further text response.)"
+                print("[WARN] Model provided no text after tool execution.")
+
+            return final_text
 
         except Exception as e:
-            error_msg = f"Error getting weather: {str(e)}"
-            print(f"[ERROR] {error_msg}")
-
-            traceback.print_exc()
-            return self._send_function_error(chat, "get_weather", error_msg)
+            error_msg = f"Critical error in process_tool_call for '{getattr(function_call, 'name', 'unknown_tool')}': {str(e)}"
+            print(f"\n[ERROR] {error_msg}")
+            print(f"\n[ERROR] Details: {traceback.format_exc()}")
+            # Try to send a structured error back to the model if possible
+            # This uses the _send_function_error helper which should be defined elsewhere
+            # or implemented here if it's simple enough.
+            # For now, returning a simple error string to the user if _send_function_error is complex.
+            # return f"Error processing tool: {str(e)}" # This would go to the end user directly
+            # Let's assume _send_function_error exists and handles sending error to model via chat_session
+            current_fn_name = getattr(function_call, 'name', 'unknown_tool_in_exception')
+            return self._send_function_error(chat_session, current_fn_name, error_msg)
 
     def chat(self, prompt: str) -> str:
         """
@@ -578,93 +360,93 @@ class GoogleAIIntegration:
         try:
             print(f"\n[User] {prompt}")
 
-            # Initialize the model with system instruction and start a chat session
-            model = self.initialize_model()
-            chat = model.start_chat(enable_automatic_function_calling=False)
+            model = self.initialize_model() # This already incorporates tools
+            # Start chat without automatic function calling, as we handle it manually
+            chat_session = model.start_chat(enable_automatic_function_calling=False)
 
             print(f"\n{'='*50}")
-
             # Send the initial message
-            response = chat.send_message(
+            response = chat_session.send_message(
                 prompt,
-                generation_config={
-                    'temperature': 0.2,
-                },
-                safety_settings=[
-                    {
-                        'category': 'HARM_CATEGORY_HARASSMENT',
-                        'threshold': 'BLOCK_ONLY_HIGH'
-                    },
-                    {
-                        'category': 'HARM_CATEGORY_HATE_SPEECH',
-                        'threshold': 'BLOCK_ONLY_HIGH'
-                    },
-                    {
-                        'category': 'HARM_CATEGORY_SEXUALLY_EXPLICIT',
-                        'threshold': 'BLOCK_ONLY_HIGH'
-                    },
-                    {
-                        'category': 'HARM_CATEGORY_DANGEROUS_CONTENT',
-                        'threshold': 'BLOCK_ONLY_HIGH'
-                    },
-                ]
+                generation_config={'temperature': 0.2},
+                safety_settings=self.SAFETY_SETTINGS_CONFIG # Use class constant
             )
 
-            # Get the response text
-            if hasattr(response, 'text'):
-                response_text = response.text
-            elif hasattr(response, 'candidates') and response.candidates:
-                candidate = response.candidates[0]
-                if hasattr(candidate, 'content') and hasattr(candidate.content, 'parts'):
-                    response_text = '\n'.join(part.text for part in candidate.content.parts if hasattr(part, 'text'))
-            else:
-                response_text = str(response) if response else "No response generated"
+            # Check if the model responded with a structured function call
+            if response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
+                for part in response.candidates[0].content.parts:
+                    if part.function_call:
+                        args_for_debug = "(unable to display args)"
+                        try:
+                            args_for_debug = self._extract_args_from_proto(part.function_call.args)
+                        except Exception as debug_ex:
+                            print(f"[DEBUG_WARN] Could not parse args for debug print: {debug_ex}")
+                        print(f"[DEBUG] Model wants to call function: {part.function_call.name} with args: {args_for_debug}")
+                        # Process the structured function call
+                        return self.process_tool_call(part.function_call, chat_session)
 
-            print(f"\n[DEBUG] Response text: {response_text}")
+            # If no structured function call, extract direct text response
+            response_text = ""
+            if response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
+                response_text = "".join(p.text for p in response.candidates[0].content.parts if hasattr(p, 'text')).strip()
 
-            # Check for tool call in the response
-            tool_call = self._extract_tool_call(response_text)
-            if tool_call:
-                print(f"[DEBUG] Extracted tool call: {tool_call}")
+            if not response_text: # Fallback if parts didn't yield text
+                if hasattr(response, 'text') and response.text:
+                    response_text = response.text
+                elif response.candidates and response.candidates[0].finish_reason == 'STOP' and not response_text:
+                    response_text = "(Model generated no text content before stopping)"
+                else:
+                    # More informative message if no text and not a simple STOP
+                    finish_reason = response.candidates[0].finish_reason if response.candidates and response.candidates[0] else 'N/A'
+                    response_text = f"(No textual response. Finish reason: {finish_reason})"
 
-                # Create a mock function call object
-                class MockFunctionCall:
-                    def __init__(self, name, args):
+            print(f"\n[DEBUG] Direct response text (no structured tool call or after fallback): {response_text}")
+
+            # Fallback: Check for manually formatted tool call in the response text (e.g., /tool ...)
+            manual_tool_call_data = self._extract_tool_call(response_text)
+            if manual_tool_call_data:
+                print(f"[DEBUG] Extracted manual tool call from text: {manual_tool_call_data}")
+
+                args_struct = Struct()
+                if isinstance(manual_tool_call_data.get('args'), dict):
+                    for k, v_val in manual_tool_call_data['args'].items():
+                        val_obj = Value()
+                        if isinstance(v_val, str):
+                            val_obj.string_value = v_val
+                        elif isinstance(v_val, (int, float)):
+                            val_obj.number_value = v_val
+                        elif isinstance(v_val, bool):
+                            val_obj.bool_value = v_val
+                        else: # Default to string for other types
+                            val_obj.string_value = str(v_val)
+                        args_struct.fields[k].CopyFrom(val_obj)
+
+                # Mimic genai.types.FunctionCall structure for process_tool_call
+                class MockGeminiFunctionCall:
+                    def __init__(self, name, arguments_struct):
                         self.name = name
-                        self.args = args
+                        self.args = arguments_struct # process_tool_call expects .args to be the Struct
 
+                mock_call = MockGeminiFunctionCall(
+                    name=manual_tool_call_data['name'],
+                    arguments_struct=args_struct
+                )
                 try:
-                    mock_call = MockFunctionCall(
-                        name=tool_call['name'],
-                        args=tool_call['args']
-                    )
-
-                    # Process the tool call
-                    response = self.process_tool_call(mock_call, chat)
-                    print(f"\n[Response] {response}")
-
-                    # Get the final response text after tool call
-                    if hasattr(response, 'text'):
-                        return response.text
-                    return str(response) if response else "No response from tool"
-
+                    return self.process_tool_call(mock_call, chat_session)
                 except Exception as e:
-                    error_msg = f"Error processing tool call: {str(e)}"
+                    error_msg = f"Error processing manual tool call '{mock_call.name}': {str(e)}"
                     print(f"\n[ERROR] {error_msg}")
-                    import traceback
                     traceback.print_exc()
-                    return f"Error processing your request: {str(e)}"
+                    # Send a structured error back to the model
+                    return self._send_function_error(chat_session, mock_call.name, error_msg)
 
-            # If no tool call was found, return the original response
             return response_text
 
         except Exception as e:
-            error_msg = f"An error occurred: {str(e)}"
+            error_msg = f"An error occurred in chat method: {str(e)}"
             print(f"\n[ERROR] {error_msg}")
-            import traceback
             print(f"\n[ERROR] Details: {traceback.format_exc()}")
-            return f"I'm sorry, but I encountered an error: {str(e)}"
-
+            return f"I'm sorry, but I encountered a critical error: {str(e)}"
 
 def main():
     """Example usage of the GoogleAIIntegration class."""
