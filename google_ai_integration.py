@@ -6,8 +6,9 @@ from pathlib import Path
 import google.generativeai as genai
 from google.generativeai.types import HarmCategory, HarmBlockThreshold
 from typing import Dict, Any, Optional, List, Union, Literal, TypedDict
-from tools.weather_tool import WeatherTool
 from google.protobuf.struct_pb2 import Value, Struct # For manual tool call mocking
+import importlib
+import inspect
 
 # Type definitions for function calling
 class FunctionCall(TypedDict):
@@ -46,7 +47,50 @@ class GoogleAIIntegration:
         """
         self.model_name = model_name
         self._configure_gemini()
-        self.weather_tool = WeatherTool(user_agent=f"google_ai_integration/{self.model_name}")
+        self.tools: Dict[str, Any] = {}
+        self._load_tools()
+        self.chat_session: Optional[genai.ChatSession] = None
+
+    def _load_tools(self):
+        """Dynamically load tools from the 'tools' subdirectory."""
+        tools_dir = Path(__file__).parent / "tools"
+        if not tools_dir.is_dir():
+            print(f"[WARNING] Tools directory not found: {tools_dir}")
+            return
+
+        for tool_file in tools_dir.glob("[!_]*.py"): # Ignore files starting with _
+            module_name = f"tools.{tool_file.stem}"
+            try:
+                module = importlib.import_module(module_name)
+                for name, obj in inspect.getmembers(module):
+                    if inspect.isclass(obj) and obj.__module__ == module_name and hasattr(obj, 'get_definition') and hasattr(obj, 'execute'):
+                        # Instantiate the tool
+                        # Pass user_agent if the tool's __init__ accepts it
+                        tool_instance_args = {}
+                        init_params = inspect.signature(obj.__init__).parameters
+                        if 'user_agent' in init_params:
+                            tool_instance_args['user_agent'] = f"google_ai_integration/{self.model_name}"
+                        if 'base_path' in init_params: # For FileTool
+                             # You might want to make base_path configurable or derive it
+                            tool_instance_args['base_path'] = str(Path.cwd())
+
+                        tool_instance = obj(**tool_instance_args)
+
+                        # Get the tool's function name from its definition
+                        tool_def = tool_instance.get_definition()
+                        if tool_def and tool_def.get('function_declarations'):
+                            func_name = tool_def['function_declarations'][0].get('name')
+                            if func_name:
+                                self.tools[func_name] = tool_instance
+                                print(f"[INFO] Loaded tool: {func_name} from {module_name}")
+                            else:
+                                print(f"[WARNING] Tool {name} in {module_name} has no function name in definition.")
+                        else:
+                            print(f"[WARNING] Tool {name} in {module_name} has no definition.")
+                        break # Assuming one tool class per file
+            except Exception as e:
+                print(f"[ERROR] Failed to load tool from {tool_file.name}: {e}")
+                traceback.print_exc()
 
     def _get_secrets_path(self) -> Path:
         """Get the path to the secrets.ini file."""
@@ -116,35 +160,45 @@ class GoogleAIIntegration:
 
     def _get_system_instruction(self) -> str:
         """
-        Get the system instruction for the model.
+        Get the system instruction for the model, dynamically including tool information.
 
         Returns:
             str: The system instruction
         """
-        base_prompt = "You are a helpful AI assistant. You have access to the following tools:"
+        base_instruction = (
+            "You are a helpful AI assistant. "
+            "When a user asks for an action that can be performed by a tool, "
+            "you MUST respond with a tool call in the specified JSON format. "
+            "Do not add any explanatory text before or after the tool call itself. "
+            "If you are unsure or the action cannot be performed by a tool, respond naturally."
+        )
 
-        tool_instructions = []
-        # In the future, if you have multiple tools, you would iterate through them here.
-        # For now, we just have the weather tool.
-        if hasattr(self, 'weather_tool') and hasattr(self.weather_tool, 'get_invocation_instructions'):
-            tool_instructions.append(self.weather_tool.get_invocation_instructions())
+        tool_descriptions = []
+        tool_invocation_instructions = []
 
-        # Combine instructions
-        full_tool_instructions = "\n\n".join(tool_instructions)
+        if not self.tools:
+            tool_descriptions.append("No tools are currently available.")
+        else:
+            tool_descriptions.append("Available tools:")
+            for tool_name, tool_instance in self.tools.items():
+                summary = getattr(tool_instance, 'get_summary', lambda: 'No summary available.')()
+                tool_descriptions.append(f"- {tool_name}: {summary}")
 
-        # General instructions for after tool use, or non-tool queries
-        general_behavior = """For all other queries not related to the tools above, respond normally.
+                invocation_instr = getattr(tool_instance, 'get_invocation_instructions', lambda: None)()
+                if invocation_instr:
+                    tool_invocation_instructions.append(f"Instructions for {tool_name}:\n{invocation_instr}")
 
-When providing weather information (after a successful tool call), include relevant details like:
-- Current temperature and conditions
-- Wind speed and direction
-- Humidity levels
-- A brief forecast for the next few hours or the day
-- Any relevant weather alerts or warnings
+            tool_descriptions.append("\nTo get detailed help for a specific tool, you can say: /help <tool_name> (This will be handled by the application, not the AI model directly). Example: /help get_weather")
 
-Always be friendly and helpful!"""
+        system_instruction_parts = [base_instruction]
+        system_instruction_parts.extend(tool_descriptions)
+        system_instruction_parts.append("\nTool Invocation Details:")
+        system_instruction_parts.extend(tool_invocation_instructions)
 
-        return f"{base_prompt}\n\n{full_tool_instructions}\n\n{general_behavior}"
+        system_instruction = "\n\n".join(filter(None, system_instruction_parts))
+
+        # print(f"[DEBUG] System Instruction:\n{system_instruction}") # For debugging
+        return system_instruction
 
     def _extract_tool_call(self, text: str) -> Optional[dict]:
         """
@@ -177,10 +231,22 @@ Always be friendly and helpful!"""
         """Initialize the Gemini model with tools and safety settings."""
         self._configure_gemini()
 
-        # Create model with system instruction and tools
+        tool_definitions = [tool.get_definition() for tool in self.tools.values() if hasattr(tool, 'get_definition')]
+
         model = genai.GenerativeModel(
             model_name=self.model_name,
-            tools=[self.weather_tool.get_definition()],
+            tools=tool_definitions if tool_definitions else None, # Pass None if no tools
+            safety_settings=self._get_safety_settings(),
+            system_instruction=self._get_system_instruction()
+        )
+
+        return model
+        # Create model with system instruction and tools
+        tool_definitions = [tool.get_definition() for tool in self.tools.values() if hasattr(tool, 'get_definition')]
+
+        model = genai.GenerativeModel(
+            model_name=self.model_name,
+            tools=tool_definitions if tool_definitions else None, # Pass None if no tools
             safety_settings=self._get_safety_settings(),
             system_instruction=self._get_system_instruction()
         )
@@ -296,26 +362,30 @@ Always be friendly and helpful!"""
 
             print(f"\n[AI] Tool requested: {tool_name} with args: {tool_args}")
 
-            api_response_data = None
-            if tool_name == 'get_weather':
-                if hasattr(self, 'weather_tool'):
-                    api_response_data = self.weather_tool.execute(**tool_args)
-                    print(f"[DEBUG] Weather tool raw response: {api_response_data}")
-                else:
-                    error_msg = "Weather tool not initialized internally."
-                    print(f"[ERROR] {error_msg}")
-                    api_response_data = {'error': error_msg}
+            tool_instance = self.tools.get(tool_name)
+            tool_response_content = None
+
+            if tool_instance and hasattr(tool_instance, 'execute'):
+                try:
+                    tool_response_content = tool_instance.execute(**tool_args)
+                    print(f"[DEBUG] Tool {tool_name} raw response: {tool_response_content}")
+                except Exception as e:
+                    error_msg = f"Error executing tool {tool_name}: {str(e)}"
+                    print(f"\n[ERROR] {error_msg}")
+                    traceback.print_exc()
+                    tool_response_content = {'error': error_msg}
             else:
-                error_msg = f"Unknown tool: {tool_name}"
-                print(f"[ERROR] {error_msg}")
-                api_response_data = {'error': error_msg}
+                error_msg = f"Unknown or non-executable tool: {tool_name}"
+                print(f"\n[ERROR] {error_msg}")
+                # It's important to send a response back to the model even if the tool is unknown
+                tool_response_content = {'error': error_msg}
 
             # Send the tool's response (success or error) back to the model using dictionary format
             model_response_after_tool = chat_session.send_message(
                 [{
                     'function_response': {
                         'name': tool_name,
-                        'response': api_response_data
+                        'response': tool_response_content
                     }
                 }],
                 stream=False
@@ -357,31 +427,42 @@ Always be friendly and helpful!"""
         Returns:
             The model's final response
         """
+        print(f"\n[User] {prompt}")
+
+        # Handle /help command locally
+        if prompt.strip().lower().startswith("/help"):
+            parts = prompt.strip().split()
+            if len(parts) == 2:
+                help_tool_name = parts[1]
+                tool_instance = self.tools.get(help_tool_name)
+                if tool_instance and hasattr(tool_instance, 'get_help'):
+                    return f"[Help for {help_tool_name}]\n{tool_instance.get_help()}"
+                else:
+                    available_tools_str = ', '.join(self.tools.keys()) if self.tools else 'None'
+                    return f"Sorry, I couldn't find help for '{help_tool_name}'. Available tools are: {available_tools_str}."
+            else:
+                return "Usage: /help <tool_name>\nExample: /help get_weather"
+
         try:
-            print(f"\n[User] {prompt}")
+            if self.chat_session is None:
+                model = self.initialize_model()
+                self.chat_session = model.start_chat(history=[])
 
-            model = self.initialize_model() # This already incorporates tools
-            # Start chat without automatic function calling, as we handle it manually
-            chat_session = model.start_chat(enable_automatic_function_calling=False)
+            chat_session = self.chat_session
 
-            print(f"\n{'='*50}")
-            # Send the initial message
+            # Send the message to the model
+            # Disabling automatic function calling as we handle it manually for more control
             response = chat_session.send_message(
                 prompt,
-                generation_config={'temperature': 0.2},
-                safety_settings=self.SAFETY_SETTINGS_CONFIG # Use class constant
+                generation_config={'temperature': 0.2}, # Example config
+                # safety_settings=self._get_safety_settings(), # Already set in model init
+                # tools are already part of the model from initialize_model()
             )
 
-            # Check if the model responded with a structured function call
+            # Check for structured function call from the model
             if response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
                 for part in response.candidates[0].content.parts:
-                    if part.function_call:
-                        args_for_debug = "(unable to display args)"
-                        try:
-                            args_for_debug = self._extract_args_from_proto(part.function_call.args)
-                        except Exception as debug_ex:
-                            print(f"[DEBUG_WARN] Could not parse args for debug print: {debug_ex}")
-                        print(f"[DEBUG] Model wants to call function: {part.function_call.name} with args: {args_for_debug}")
+                    if hasattr(part, 'function_call') and part.function_call:
                         # Process the structured function call
                         return self.process_tool_call(part.function_call, chat_session)
 
@@ -392,12 +473,11 @@ Always be friendly and helpful!"""
 
             if not response_text: # Fallback if parts didn't yield text
                 if hasattr(response, 'text') and response.text:
-                    response_text = response.text
+                    response_text = response.text # This might be the case for some simpler models/responses
                 elif response.candidates and response.candidates[0].finish_reason == 'STOP' and not response_text:
                     response_text = "(Model generated no text content before stopping)"
                 else:
-                    # More informative message if no text and not a simple STOP
-                    finish_reason = response.candidates[0].finish_reason if response.candidates and response.candidates[0] else 'N/A'
+                    finish_reason = response.candidates[0].finish_reason if (response.candidates and len(response.candidates) > 0) else 'N/A'
                     response_text = f"(No textual response. Finish reason: {finish_reason})"
 
             print(f"\n[DEBUG] Direct response text (no structured tool call or after fallback): {response_text}")
@@ -411,21 +491,22 @@ Always be friendly and helpful!"""
                 if isinstance(manual_tool_call_data.get('args'), dict):
                     for k, v_val in manual_tool_call_data['args'].items():
                         val_obj = Value()
+                        # Basic type handling for Struct, can be expanded
                         if isinstance(v_val, str):
                             val_obj.string_value = v_val
                         elif isinstance(v_val, (int, float)):
                             val_obj.number_value = v_val
                         elif isinstance(v_val, bool):
                             val_obj.bool_value = v_val
-                        else: # Default to string for other types
-                            val_obj.string_value = str(v_val)
+                        # else: # Could handle lists/nested structs if needed
+                        #     val_obj.string_value = str(v_val) # Default to string
                         args_struct.fields[k].CopyFrom(val_obj)
 
                 # Mimic genai.types.FunctionCall structure for process_tool_call
                 class MockGeminiFunctionCall:
                     def __init__(self, name, arguments_struct):
                         self.name = name
-                        self.args = arguments_struct # process_tool_call expects .args to be the Struct
+                        self.args = arguments_struct
 
                 mock_call = MockGeminiFunctionCall(
                     name=manual_tool_call_data['name'],
@@ -437,13 +518,12 @@ Always be friendly and helpful!"""
                     error_msg = f"Error processing manual tool call '{mock_call.name}': {str(e)}"
                     print(f"\n[ERROR] {error_msg}")
                     traceback.print_exc()
-                    # Send a structured error back to the model
                     return self._send_function_error(chat_session, mock_call.name, error_msg)
 
             return response_text
 
         except Exception as e:
-            error_msg = f"An error occurred in chat method: {str(e)}"
+            error_msg = f"An error occurred in the chat method: {str(e)}"
             print(f"\n[ERROR] {error_msg}")
             print(f"\n[ERROR] Details: {traceback.format_exc()}")
             return f"I'm sorry, but I encountered a critical error: {str(e)}"
@@ -456,9 +536,10 @@ def main():
 
         # Example queries
         queries = [
-            "What's the weather like in Tokyo today?",
+            # "What's the weather like in Tokyo today?",
             "How about San Francisco, in fahrenheit?",
-            "Tell me a joke."
+            "Show me the contents of the file '/home/grimlock/ai/ai-thing/requirements.txt'",
+            "Tell me a joke about computers."
         ]
 
         for query in queries:

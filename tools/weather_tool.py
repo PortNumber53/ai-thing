@@ -38,6 +38,16 @@ class WeatherTool:
             }]
         }
 
+    def get_summary(self) -> str:
+        """Returns a brief summary of the tool's capabilities."""
+        return "Fetches current weather and a 24-hour forecast for a given location."
+
+    def get_help(self) -> str:
+        """Returns detailed help information for the tool."""
+        # For now, get_help can reuse get_invocation_instructions.
+        # It can be expanded later if more detailed, distinct help is needed.
+        return self.get_invocation_instructions()
+
     def get_invocation_instructions(self) -> str:
         """Returns the specific instructions for how the LLM should invoke this tool."""
         return """When the user asks about the weather, you MUST respond with a tool call in this exact format:
