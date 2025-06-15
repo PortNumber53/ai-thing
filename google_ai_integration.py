@@ -537,9 +537,11 @@ def main():
         # Example queries
         queries = [
             # "What's the weather like in Tokyo today?",
-            "How about San Francisco, in fahrenheit?",
-            "Show me the contents of the file '/home/grimlock/ai/ai-thing/requirements.txt'",
-            "Tell me a joke about computers."
+            # "How about San Francisco, in fahrenheit?",
+            # "Show me the contents of the file '/home/grimlock/tmp/snake_game.html'",
+            "Write a joke about computers to this file '/home/grimlock/tmp/computer_joke.txt'"
+            # "Please make the snake of the game be made of circles instead of squares, the file is '/home/grimlock/tmp/snake_game.html'"
+            # "Tell me a joke about computers."
         ]
 
         for query in queries:

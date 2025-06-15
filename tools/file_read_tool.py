@@ -85,7 +85,7 @@ def read_file_safely(file_path: str, start_line: Optional[int] = None, end_line:
             "exists": os.path.exists(file_path) if 'file_path' in locals() else None
         }
 
-class FileTool:
+class FileReadTool:
     def __init__(self, base_path: str = None):
         """
         Initialize the FileTool.
