@@ -1,6 +1,7 @@
 import json
 import os
 from typing import Dict, Any, Optional, List
+from pathlib import Path
 
 def read_file_safely(file_path: str, start_line: Optional[int] = None, end_line: Optional[int] = None) -> Dict[str, Any]:
     """
@@ -86,27 +87,32 @@ def read_file_safely(file_path: str, start_line: Optional[int] = None, end_line:
         }
 
 class FileReadTool:
-    def __init__(self, base_path: str = None):
+    def __init__(self, chroot_dir: str):
         """
-        Initialize the FileTool.
+        Initialize the FileReadTool.
 
         Args:
-            base_path: Optional base path to resolve relative paths against
+            chroot_dir: The mandatory chroot directory. All file paths will be relative to this.
         """
-        self.base_path = os.path.abspath(base_path) if base_path else None
+        if not chroot_dir:
+            raise ValueError("chroot_dir cannot be empty or None for FileReadTool.")
+        self.chroot_dir = Path(chroot_dir).resolve()
+        if not self.chroot_dir.is_dir():
+            # Or raise an error, depending on desired behavior if chroot isn't pre-existing
+            print(f"[WARNING] Chroot directory {self.chroot_dir} for FileReadTool does not exist or is not a directory.")
 
     def get_definition(self) -> Dict[str, Any]:
         """Returns the tool definition for the Gemini model."""
         return {
             'function_declarations': [{
                 'name': 'read_file',
-                'description': 'Read contents of a file from the filesystem with optional line range.',
+                'description': 'Reads contents of a file from a secure directory (chroot jail) with optional line range. Attempts to access files outside this directory will be denied.',
                 'parameters': {
                     'type': 'OBJECT',
                     'properties': {
                         'file_path': {
                             'type': 'STRING',
-                            'description': 'Path to the file to read. Can be absolute or relative to the base path.'
+                            'description': 'Path to the file to read, relative to the configured secure chroot directory. Do not use absolute paths or try to escape the chroot (e.g., with `../`).'
                         },
                         'start_line': {
                             'type': 'INTEGER',
@@ -128,14 +134,12 @@ class FileReadTool:
 
     def get_help(self) -> str:
         """Returns detailed help information for the tool."""
-        # For now, get_help can reuse get_invocation_instructions.
-        # It can be expanded later if more detailed, distinct help is needed.
-        return self.get_invocation_instructions()
+        return self.get_invocation_instructions() # Updated to reflect chroot
 
     def get_invocation_instructions(self) -> str:
         """Returns the specific instructions for how the LLM should invoke this tool."""
         return """When you need to read a file, you MUST respond with a tool call in this exact format:
-/tool read_file({"file_path": "/path/to/file"})
+/tool read_file({"file_path": "relative/path/to/file_within_chroot.txt"})
 
 Examples:
 User: Show me the contents of config.json
@@ -145,26 +149,50 @@ User: What's in lines 5-10 of script.py?
 You: /tool read_file({"file_path": "script.py", "start_line": 5, "end_line": 10})
 
 Important:
+- The 'file_path' MUST be relative to a pre-configured secure directory (chroot jail).
+- Do NOT use absolute paths (e.g., /home/user/file.txt).
+- Do NOT attempt to access files outside this secure directory (e.g., using '../' to go up levels).
 - The response MUST start with '/tool read_file('
-- The arguments MUST be valid JSON
-- The 'file_path' parameter is REQUIRED
-- 'start_line' and 'end_line' are OPTIONAL
-- Do NOT include any other text when you want to execute a tool"""
+- The arguments MUST be valid JSON.
+- The 'file_path' parameter is REQUIRED.
+- 'start_line' and 'end_line' are OPTIONAL.
+- Do NOT include any other text when you want to execute a tool."""
 
     def execute(self, file_path: str, start_line: Optional[int] = None, end_line: Optional[int] = None) -> Dict[str, Any]:
         """
-        Execute the file read operation.
+        Execute the file read operation within the chroot jail.
 
         Args:
-            file_path: Path to the file to read
-            start_line: Optional 1-based starting line number (inclusive)
-            end_line: Optional 1-based ending line number (inclusive)
+            file_path: Path to the file to read, relative to the chroot directory.
+            start_line: Optional 1-based starting line number (inclusive).
+            end_line: Optional 1-based ending line number (inclusive).
 
         Returns:
-            Dictionary containing file content and metadata
+            Dictionary containing file content and metadata or an error message.
         """
-        # Resolve path relative to base_path if provided
-        if self.base_path and not os.path.isabs(file_path):
-            file_path = os.path.join(self.base_path, file_path)
+        if not self.chroot_dir or not self.chroot_dir.is_dir():
+            return {
+                "file_path": file_path,
+                "error": "Chroot directory not configured or is invalid for this tool."
+            }
 
-        return read_file_safely(file_path, start_line, end_line)
+        try:
+            # Treat file_path as relative to chroot_dir. Path.resolve() makes it absolute and canonical.
+            # This also helps prevent issues with '..' if not handled by is_relative_to correctly, though is_relative_to should be robust.
+            resolved_path = (self.chroot_dir / file_path).resolve()
+
+            # Security check: Ensure the resolved path is strictly within the chroot_dir.
+            # This check is crucial to prevent path traversal attacks (e.g., ../../etc/passwd).
+            if not resolved_path.is_relative_to(self.chroot_dir):
+                return {
+                    "file_path": file_path,
+                    "error": "Access denied: Path is outside the allowed directory (chroot jail)."
+                }
+        except Exception as e: # Catch potential errors during path resolution (e.g., malformed file_path string)
+            return {
+                "file_path": file_path,
+                "error": f"Invalid file path for chroot resolution: {str(e)}"
+            }
+        
+        # Pass the string representation of the validated, absolute path to the actual file reader
+        return read_file_safely(str(resolved_path), start_line, end_line)

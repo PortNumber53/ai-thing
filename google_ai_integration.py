@@ -46,6 +46,7 @@ class GoogleAIIntegration:
             model_name: The name of the model to use (default: gemini-1.5-pro-latest)
         """
         self.model_name = model_name
+        self.chroot_dir: Optional[str] = None # For profile-based chroot directory
         self._configure_gemini()
         self.tools: Dict[str, Any] = {}
         self._load_tools()
@@ -70,8 +71,22 @@ class GoogleAIIntegration:
                         init_params = inspect.signature(obj.__init__).parameters
                         if 'user_agent' in init_params:
                             tool_instance_args['user_agent'] = f"google_ai_integration/{self.model_name}"
-                        if 'base_path' in init_params: # For FileTool
-                             # You might want to make base_path configurable or derive it
+
+                        # Pass chroot_dir to file operation tools
+                        if name in ['FileReadTool', 'FileFullWriteTool']:
+                            if 'chroot_dir' in init_params:
+                                if self.chroot_dir:
+                                    tool_instance_args['chroot_dir'] = self.chroot_dir
+                                else:
+                                    # This should not happen if _configure_gemini ran successfully, as chroot is mandatory.
+                                    print(f"[CRITICAL_ERROR] Chroot directory not configured for {name} but it's required. Skipping tool loading.")
+                                    continue # Skip loading this tool
+                            else:
+                                print(f"[WARNING] File tool {name} does not accept 'chroot_dir' in __init__. Update tool to support chroot.")
+                                # Potentially skip loading or load with a warning that it's not jailed.
+                                # For now, we assume tools will be updated.
+                        elif 'base_path' in init_params: # Fallback for other tools that might still use base_path
+                            print(f"[INFO] Tool {name} uses 'base_path', setting to CWD. Consider updating to 'chroot_dir' if it performs file ops.")
                             tool_instance_args['base_path'] = str(Path.cwd())
 
                         tool_instance = obj(**tool_instance_args)
@@ -96,63 +111,114 @@ class GoogleAIIntegration:
         """Get the path to the secrets.ini file."""
         return Path.home() / ".config" / "secrets.ini"
 
-    def _read_api_key(self) -> tuple[str, str]:
+    def _load_profile_config(self) -> tuple[str, str, str]:
         """
-        Read the Google API key and model name from the secrets.ini file.
+        Load configuration from secrets.ini based on profiles.
+
+        Reads the active profile (or default) to get API key, model, and chroot path.
+        'chroot' and 'google_ai_api_key' are mandatory in the resolved profile.
+        'google_ai_model' is optional and falls back to the initial model_name.
+
+        Expected secrets.ini format:
+        [default]
+        profile=jira_guy  # Optional: specifies active profile
+        google_ai_api_key = default_api_key_here
+        google_ai_model = default_model_here
+        chroot=/default/chroot/path
+
+        [profile:jira_guy]
+        google_ai_api_key = jira_specific_key
+        google_ai_model = jira_specific_model
+        chroot=/jira/chroot/path
 
         Returns:
-            tuple: (api_key, model_name)
+            tuple: (api_key, model_name, chroot_dir)
+        Raises:
+            FileNotFoundError: If secrets.ini is not found.
+            KeyError: If mandatory sections or keys are missing.
+            ValueError: If mandatory values are not set.
         """
         secrets_path = self._get_secrets_path()
         if not secrets_path.exists():
-            raise FileNotFoundError(
-                f"Secrets file not found at {secrets_path}. "
-                "Please create it with your Google API key in the [google] section as 'api_key'."
-            )
+            raise FileNotFoundError(f"Secrets file not found at {secrets_path}.")
 
         config = configparser.ConfigParser()
         config.read(secrets_path)
 
-        if 'google' not in config:
-            raise KeyError(
-                "[google] section not found in secrets.ini. "
-                "Please add your Google API key in the [google] section as 'api_key'."
-            )
+        if 'default' not in config:
+            raise KeyError("[default] section not found in secrets.ini.")
 
-        api_key = config['google'].get('api_key')
-        if not api_key:
-            raise ValueError(
-                "'api_key' not found in the [google] section of secrets.ini. "
-                "Please add your Google API key."
-            )
+        active_profile_name = config['default'].get('profile')
 
-        # Get model name with fallback to the instance's default
-        model_name = config['google'].get('model', self.model_name)
+        current_profile_section_name = 'default'
+        if active_profile_name:
+            current_profile_section_name = f"profile:{active_profile_name}"
+            if current_profile_section_name not in config:
+                raise KeyError(f"Profile section '[{current_profile_section_name}]' not found, but specified in [default].profile.")
 
-        return api_key, model_name
+        def get_value(key: str, profile_section: str, default_section: str = 'default', is_mandatory: bool = True, fallback_value: Optional[str] = None) -> Optional[str]:
+            value = config.get(profile_section, key, fallback=None)
+            if value is None and profile_section != default_section:
+                value = config.get(default_section, key, fallback=None)
+
+            if value is None and is_mandatory:
+                raise ValueError(f"Mandatory key '{key}' not found in profile '{profile_section}' or in '[default]'.")
+            return value if value is not None else fallback_value
+
+        api_key = get_value('google_ai_api_key', current_profile_section_name, is_mandatory=True)
+        if not api_key: # Should be caught by is_mandatory=True, but as an extra check.
+            raise ValueError(f"'google_ai_api_key' is not set in profile '{current_profile_section_name}' or '[default]'.")
+
+        chroot_dir = get_value('chroot', current_profile_section_name, is_mandatory=True)
+        if not chroot_dir: # Should be caught by is_mandatory=True.
+            raise ValueError(f"'chroot' is not set in profile '{current_profile_section_name}' or '[default]'.")
+
+        # Model name uses self.model_name (from __init__) as the ultimate fallback
+        model_name = get_value('google_ai_model', current_profile_section_name, is_mandatory=False, fallback_value=self.model_name)
+        if not model_name: # If fallback_value was None and no config found
+             model_name = self.model_name
+
+        return api_key, model_name, chroot_dir
 
     def _configure_gemini(self) -> None:
         """
-        Configure the Gemini API with the API key and model from ~/.config/secrets.ini.
+        Configure the Gemini API using settings from the active profile in ~/.config/secrets.ini.
 
-        The secrets.ini file should have the following format:
-        [google]
-        api_key = your_google_api_key_here
-        model = gemini-1.5-pro-latest  # optional
+        The secrets.ini file should use the new profile format:
+        [default]
+        profile=jira_guy  # Optional: specifies active profile
+        google_ai_api_key = default_api_key_here
+        google_ai_model = default_model_here
+        chroot=/default/chroot/path
+
+        [profile:jira_guy]
+        google_ai_api_key = jira_specific_key
+        chroot=/jira/chroot/path
+        # google_ai_model is optional here, falls back to default or __init__
         """
         try:
-            api_key, model_name = self._read_api_key()
-            self.model_name = model_name  # Update model name if specified in config
+            api_key, model_name, chroot_dir = self._load_profile_config()
+            self.model_name = model_name  # Update model name based on profile config
+            self.chroot_dir = chroot_dir  # Store the chroot directory
             genai.configure(api_key=api_key)
+            print(f"[INFO] Configured with profile. Model: {self.model_name}, Chroot: {self.chroot_dir}")
         except Exception as e:
-            raise RuntimeError(
-                f"Failed to configure Gemini API: {str(e)}\n"
-                "Please ensure you have a valid Google API key in ~/.config/secrets.ini\n"
-                "with the following format:\n\n"
-                "[google]\n"
-                "api_key = your_google_api_key_here\n"
-                "model = gemini-1.5-pro-latest  # optional"
-            ) from e
+            error_message = (
+                f"Failed to configure Gemini API with profile system: {str(e)}\n"
+                "Please ensure your ~/.config/secrets.ini is formatted correctly with profiles.\n"
+                "Mandatory keys 'google_ai_api_key' and 'chroot' must be present in the active profile or [default].\n"
+                "Example format:\n"
+                "[default]\n"
+                "  google_ai_api_key = YOUR_DEFAULT_KEY\n"
+                "  chroot = /path/to/default/chroot\n"
+                "  # profile = my_profile_name  (optional)\n"
+                "  # google_ai_model = gemini-model (optional)\n\n"
+                "[profile:my_profile_name]\n"
+                "  google_ai_api_key = YOUR_PROFILE_KEY\n"
+                "  chroot = /path/to/profile/chroot\n"
+                "  # google_ai_model = gemini-model-for-profile (optional)"
+            )
+            raise RuntimeError(error_message) from e
 
     def _get_safety_settings(self) -> list[dict]:
         """Returns the safety settings for the model."""
@@ -529,7 +595,7 @@ def main():
             # "How about San Francisco, in fahrenheit?",
             # "Show me the contents of the file '/home/grimlock/tmp/snake_game.html'",
             # "Write a joke about computers to this file '/home/grimlock/tmp/computer_joke.txt'",
-            "What are the temperatures in the locations listed in the '/home/grimlock/tmp/locations.txt', write the response to '/home/grimlock/tmp/temps.txt'",
+            "What are the temperatures in the locations listed in 'locations.txt', write the response to '../temps.txt'",
             # "Please make the snake of the game be made of circles instead of squares, the file is '/home/grimlock/tmp/snake_game.html'"
             # "Tell me a joke about computers."
         ]
