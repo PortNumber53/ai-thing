@@ -5,7 +5,7 @@ import argparse
 import traceback
 import sys
 from pathlib import Path
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Optional, Dict, Any, List, Tuple, Union, Literal, TypedDict
 import google.generativeai as genai
 from google.generativeai.types import HarmCategory, HarmBlockThreshold
 from typing import Dict, Any, Optional, List, Union, Literal, TypedDict
