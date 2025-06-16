@@ -65,7 +65,7 @@ Creates a state machine with these nodes:
 
 ## Configuration
 
-Configuration is managed through a `secrets.ini` file in the user's config directory (`~/.config/secrets.ini`). The file should have the following format:
+Configuration is managed through a `secrets.ini` file in the user's config directory (`~/.config/ai-thing/secrets.ini`). The file should have the following format:
 
 ```ini
 [google]
