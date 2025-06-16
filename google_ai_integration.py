@@ -1,8 +1,11 @@
 import os
 import json
 import configparser
+import argparse
 import traceback
+import sys
 from pathlib import Path
+from typing import Optional, Dict, Any, List, Tuple
 import google.generativeai as genai
 from google.generativeai.types import HarmCategory, HarmBlockThreshold
 from typing import Dict, Any, Optional, List, Union, Literal, TypedDict
@@ -38,17 +41,26 @@ class GoogleAIIntegration:
         {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
     ]
 
-    def __init__(self, model_name: str = "gemini-1.5-pro-latest"):
+    def __init__(self, model_name: str = "gemini-1.5-flash-preview-0514", profile_name: Optional[str] = None):
         """
         Initialize the Google AI integration.
 
         Args:
-            model_name: The name of the model to use (default: gemini-1.5-pro-latest)
+            model_name: The name of the model to use.
+            profile_name: The name of the profile to use from secrets.ini.
         """
         self.model_name = model_name
-        self.chroot_dir: Optional[str] = None # For profile-based chroot directory
-        self._configure_gemini()
+        self.profile_name = profile_name
         self.tools: Dict[str, Any] = {}
+        self.tool_definitions: List[Any] = []
+        self.chroot_dir: Optional[Path] = None
+        self.mcp_config_file_path: Optional[Path] = None
+        self.mcp_server_configs: Dict[str, Dict[str, Any]] = {}
+        self.active_profile_name: Optional[str] = None
+        self.google_ai_api_key: Optional[str] = None
+        
+        self._configure_gemini()
+        self._load_mcp_configurations()
         self._load_tools()
         self.chat_session: Optional[genai.ChatSession] = None
 
@@ -75,7 +87,7 @@ class GoogleAIIntegration:
                         # Pass chroot_dir to file operation tools
                         if name in ['FileReadTool', 'FileFullWriteTool']:
                             if 'chroot_dir' in init_params:
-                                if self.chroot_dir:
+                                if self.chroot_dir: # self.chroot_dir is now a Path object or None, set by _configure_gemini
                                     tool_instance_args['chroot_dir'] = self.chroot_dir
                                 else:
                                     # This should not happen if _configure_gemini ran successfully, as chroot is mandatory.
@@ -83,8 +95,6 @@ class GoogleAIIntegration:
                                     continue # Skip loading this tool
                             else:
                                 print(f"[WARNING] File tool {name} does not accept 'chroot_dir' in __init__. Update tool to support chroot.")
-                                # Potentially skip loading or load with a warning that it's not jailed.
-                                # For now, we assume tools will be updated.
                         elif 'base_path' in init_params: # Fallback for other tools that might still use base_path
                             print(f"[INFO] Tool {name} uses 'base_path', setting to CWD. Consider updating to 'chroot_dir' if it performs file ops.")
                             tool_instance_args['base_path'] = str(Path.cwd())
@@ -102,45 +112,22 @@ class GoogleAIIntegration:
                                 print(f"[WARNING] Tool {name} in {module_name} has no function name in definition.")
                         else:
                             print(f"[WARNING] Tool {name} in {module_name} has no definition.")
-                        break # Assuming one tool class per file
-            except Exception as e:
+                        # Removed 'break' to allow multiple tool classes per file if needed in future, though current convention is one.
+            except Exception as e: # This except is now correctly associated with the try for importlib.import_module
                 print(f"[ERROR] Failed to load tool from {tool_file.name}: {e}")
                 traceback.print_exc()
 
     def _get_secrets_path(self) -> Path:
         """Get the path to the secrets.ini file."""
-        return Path.home() / ".config" / "secrets.ini"
+        return Path.home() / ".config" / "ai-thing" / "secrets.ini"
 
-    def _load_profile_config(self) -> tuple[str, str, str]:
+    def _load_profile_config(self, profile_name: Optional[str] = None) -> Tuple[str, str, str, str, Optional[str]]:
         """
         Load configuration from secrets.ini based on profiles.
-
-        Reads the active profile (or default) to get API key, model, and chroot path.
-        'chroot' and 'google_ai_api_key' are mandatory in the resolved profile.
-        'google_ai_model' is optional and falls back to the initial model_name.
-
-        Expected secrets.ini format:
-        [default]
-        profile=jira_guy  # Optional: specifies active profile
-        google_ai_api_key = default_api_key_here
-        google_ai_model = default_model_here
-        chroot=/default/chroot/path
-
-        [profile:jira_guy]
-        google_ai_api_key = jira_specific_key
-        google_ai_model = jira_specific_model
-        chroot=/jira/chroot/path
-
-        Returns:
-            tuple: (api_key, model_name, chroot_dir)
-        Raises:
-            FileNotFoundError: If secrets.ini is not found.
-            KeyError: If mandatory sections or keys are missing.
-            ValueError: If mandatory values are not set.
         """
         secrets_path = self._get_secrets_path()
         if not secrets_path.exists():
-            raise FileNotFoundError(f"Secrets file not found at {secrets_path}.")
+            raise FileNotFoundError(f"secrets.ini not found at {secrets_path}")
 
         config = configparser.ConfigParser()
         config.read(secrets_path)
@@ -148,76 +135,125 @@ class GoogleAIIntegration:
         if 'default' not in config:
             raise KeyError("[default] section not found in secrets.ini.")
 
-        active_profile_name = config['default'].get('profile')
+        # Determine the logical profile name
+        logical_profile_name = profile_name or config.get('default', 'profile', fallback='default')
 
-        current_profile_section_name = 'default'
-        if active_profile_name:
-            current_profile_section_name = f"profile:{active_profile_name}"
-            if current_profile_section_name not in config:
-                raise KeyError(f"Profile section '[{current_profile_section_name}]' not found, but specified in [default].profile.")
+        # Determine the actual section name in the INI file, which may have a 'profile:' prefix
+        section_name = f"profile:{logical_profile_name}" if logical_profile_name != 'default' else 'default'
 
-        def get_value(key: str, profile_section: str, default_section: str = 'default', is_mandatory: bool = True, fallback_value: Optional[str] = None) -> Optional[str]:
-            value = config.get(profile_section, key, fallback=None)
-            if value is None and profile_section != default_section:
-                value = config.get(default_section, key, fallback=None)
+        # If the determined profile section doesn't exist, fall back to 'default' and print a warning.
+        if section_name not in config:
+            print(f"[WARNING] Profile section '[{section_name}]' not found in {secrets_path}. Falling back to '[default]' profile.", file=sys.stderr)
+            section_name = 'default'
+            logical_profile_name = 'default'
 
-            if value is None and is_mandatory:
-                raise ValueError(f"Mandatory key '{key}' not found in profile '{profile_section}' or in '[default]'.")
-            return value if value is not None else fallback_value
+        # This check should now always pass, assuming a [default] section exists.
+        if section_name not in config:
+             raise KeyError(f"Critical error: Default profile '[default]' not found in {secrets_path} after fallback.")
 
-        api_key = get_value('google_ai_api_key', current_profile_section_name, is_mandatory=True)
-        if not api_key: # Should be caught by is_mandatory=True, but as an extra check.
-            raise ValueError(f"'google_ai_api_key' is not set in profile '{current_profile_section_name}' or '[default]'.")
+        def get_value(key: str) -> Optional[str]:
+            # Get value from active profile section, fall back to default profile section
+            return config.get(section_name, key, fallback=config.get('default', key, fallback=None))
 
-        chroot_dir = get_value('chroot', current_profile_section_name, is_mandatory=True)
-        if not chroot_dir: # Should be caught by is_mandatory=True.
-            raise ValueError(f"'chroot' is not set in profile '{current_profile_section_name}' or '[default]'.")
+        api_key = get_value('google_ai_api_key')
+        if not api_key:
+            raise ValueError(f"Mandatory key 'google_ai_api_key' not found in profile '{logical_profile_name}' or '[default]'.")
 
-        # Model name uses self.model_name (from __init__) as the ultimate fallback
-        model_name = get_value('google_ai_model', current_profile_section_name, is_mandatory=False, fallback_value=self.model_name)
-        if not model_name: # If fallback_value was None and no config found
-             model_name = self.model_name
+        chroot_dir = get_value('chroot')
+        if not chroot_dir:
+            raise ValueError(f"Mandatory key 'chroot' not found in profile '{logical_profile_name}' or '[default]'.")
 
-        return api_key, model_name, chroot_dir
+        model_name = get_value('google_ai_model') or self.model_name
+        mcp_config_file_str = get_value('mcp_config_file')
 
-    def _configure_gemini(self) -> None:
+        return logical_profile_name, api_key, model_name, chroot_dir, mcp_config_file_str
+
+    def _load_mcp_configurations(self):
+        """Load MCP server configurations from the JSON file specified in secrets.ini."""
+        if not self.mcp_config_file_path:
+            print("[INFO] MCP support disabled: No MCP configuration file path set.")
+            return
+
+        if not self.mcp_config_file_path.is_file():
+            print(f"[WARNING] MCP configuration file not found: {self.mcp_config_file_path}. MCP support will be limited.")
+            return
+
+        try:
+            with open(self.mcp_config_file_path, 'r') as f:
+                data = json.load(f)
+
+            if 'mcpServers' not in data or not isinstance(data['mcpServers'], dict):
+                print(f"[WARNING] Invalid MCP configuration format in {self.mcp_config_file_path}. Missing 'mcpServers' dictionary. MCP support may not work correctly.")
+                self.mcp_server_configs = {}
+            else:
+                self.mcp_server_configs = data['mcpServers']
+                print(f"[INFO] Successfully loaded {len(self.mcp_server_configs)} MCP server configurations from {self.mcp_config_file_path}.")
+                for server_name in self.mcp_server_configs.keys():
+                    print(f"  - Found MCP server: {server_name}")
+
+        except json.JSONDecodeError:
+            print(f"[WARNING] Invalid JSON in MCP configuration file: {self.mcp_config_file_path}. MCP support may not work correctly.")
+            self.mcp_server_configs = {}
+        except Exception as e:
+            print(f"[WARNING] Error loading MCP configuration file {self.mcp_config_file_path}: {e}. MCP support may not work correctly.")
+            self.mcp_server_configs = {}
+
+    def display_info(self):
+        """Displays the current configuration, redacting sensitive information."""
+        print("AI Configuration Info:")
+        print("======================")
+        print(f"Active Profile: {self.active_profile_name}")
+        if self.google_ai_api_key:
+            redacted_key = self.google_ai_api_key[:4] + "****" + self.google_ai_api_key[-4:]
+        else:
+            redacted_key = "Not Set"
+        print(f"Google API Key: {redacted_key}")
+        print(f"Model: {self.model_name}")
+        print(f"Chroot Directory: {self.chroot_dir}")
+        print(f"MCP Config File: {self.mcp_config_file_path}")
+        if self.mcp_server_configs:
+            print("Loaded MCP Servers:")
+            for server_name in self.mcp_server_configs.keys():
+                print(f"  - {server_name}")
+        else:
+            print("No MCP Servers loaded.")
+        print("======================")
+
+    def _configure_gemini(self):
         """
-        Configure the Gemini API using settings from the active profile in ~/.config/secrets.ini.
-
-        The secrets.ini file should use the new profile format:
-        [default]
-        profile=jira_guy  # Optional: specifies active profile
-        google_ai_api_key = default_api_key_here
-        google_ai_model = default_model_here
-        chroot=/default/chroot/path
-
-        [profile:jira_guy]
-        google_ai_api_key = jira_specific_key
-        chroot=/jira/chroot/path
-        # google_ai_model is optional here, falls back to default or __init__
+        Configure the Gemini API using settings from the active profile.
         """
         try:
-            api_key, model_name, chroot_dir = self._load_profile_config()
-            self.model_name = model_name  # Update model name based on profile config
-            self.chroot_dir = chroot_dir  # Store the chroot directory
-            genai.configure(api_key=api_key)
-            print(f"[INFO] Configured with profile. Model: {self.model_name}, Chroot: {self.chroot_dir}")
+            (
+                self.active_profile_name,
+                self.google_ai_api_key,
+                self.model_name,
+                chroot_dir_str,
+                mcp_config_file_str
+            ) = self._load_profile_config(profile_name=self.profile_name)
+
+            if chroot_dir_str:
+                self.chroot_dir = Path(chroot_dir_str).resolve()
+                if not self.chroot_dir.exists() or not self.chroot_dir.is_dir():
+                    raise FileNotFoundError(f"Chroot directory '{self.chroot_dir}' does not exist or is not a directory.")
+            else:
+                raise ValueError("Chroot directory not configured.")
+
+            if mcp_config_file_str:
+                self.mcp_config_file_path = Path(mcp_config_file_str).expanduser().resolve()
+            else:
+                self.mcp_config_file_path = None
+
+            genai.configure(api_key=self.google_ai_api_key)
+            mcp_info = f", MCP Config: {self.mcp_config_file_path}" if self.mcp_config_file_path else ", MCP Config: Not set"
+            print(f"[INFO] Configured with profile. Model: {self.model_name}, Chroot: {self.chroot_dir}{mcp_info}")
         except Exception as e:
             error_message = (
                 f"Failed to configure Gemini API with profile system: {str(e)}\n"
-                "Please ensure your ~/.config/secrets.ini is formatted correctly with profiles.\n"
-                "Mandatory keys 'google_ai_api_key' and 'chroot' must be present in the active profile or [default].\n"
-                "Example format:\n"
-                "[default]\n"
-                "  google_ai_api_key = YOUR_DEFAULT_KEY\n"
-                "  chroot = /path/to/default/chroot\n"
-                "  # profile = my_profile_name  (optional)\n"
-                "  # google_ai_model = gemini-model (optional)\n\n"
-                "[profile:my_profile_name]\n"
-                "  google_ai_api_key = YOUR_PROFILE_KEY\n"
-                "  chroot = /path/to/profile/chroot\n"
-                "  # google_ai_model = gemini-model-for-profile (optional)"
+                f"Please ensure your ~/.config/ai-thing/secrets.ini is formatted correctly with profiles.\n"
+                "Mandatory keys 'google_ai_api_key' and 'chroot' must be present in the active profile or [default]."
             )
+            print(f"[ERROR] {error_message}", file=sys.stderr)
             raise RuntimeError(error_message) from e
 
     def _get_safety_settings(self) -> list[dict]:
@@ -584,30 +620,68 @@ class GoogleAIIntegration:
             return f"I'm sorry, but I encountered a critical error: {str(e)}"
 
 def main():
-    """Example usage of the GoogleAIIntegration class."""
+    """Main function to run the AI chat or CLI commands."""
+    parser = argparse.ArgumentParser(
+        description="A command-line interface for the Google AI integration.",
+        formatter_class=argparse.RawTextHelpFormatter,
+        epilog="""
+Examples:
+  - Start interactive chat: python google_ai_integration.py
+  - Run a single query: python google_ai_integration.py "What is the weather in London?"
+  - Show config info: python google_ai_integration.py info
+"""
+    )
+    
+    parser.add_argument(
+        'args',
+        nargs='*',
+        help="A command ('info') or a query to send to the AI. If omitted, starts an interactive session."
+    )
+    
+    parser.add_argument(
+        '--profile', 
+        type=str, 
+        default=None, 
+        help='Specify a configuration profile to use from secrets.ini.'
+    )
+
+    args = parser.parse_args()
+
     try:
-        # Initialize the integration
-        ai = GoogleAIIntegration()
+        ai = GoogleAIIntegration(profile_name=args.profile)
 
-        # Example queries
-        queries = [
-            # "What's the weather like in Tokyo today?",
-            # "How about San Francisco, in fahrenheit?",
-            # "Show me the contents of the file '/home/grimlock/tmp/snake_game.html'",
-            # "Write a joke about computers to this file '/home/grimlock/tmp/computer_joke.txt'",
-            "What are the temperatures in the locations listed in 'locations.txt', write the response to '../temps.txt'",
-            # "Please make the snake of the game be made of circles instead of squares, the file is '/home/grimlock/tmp/snake_game.html'"
-            # "Tell me a joke about computers."
-        ]
+        if args.args and args.args[0] == 'info':
+            if len(args.args) > 1:
+                print(f"[ERROR] The 'info' command does not take additional arguments. You provided: {' '.join(args.args[1:])}", file=sys.stderr)
+                sys.exit(1)
+            ai.display_info()
+        elif args.args:
+            query_text = " ".join(args.args)
+            print(f"[User] {query_text}")
+            response = ai.chat(query_text, max_tool_calls=10)
+            print(f"[AI] {response}")
+        else:
+            # Interactive mode
+            print("\n==================================================")
+            print("Entering interactive chat mode. Press Ctrl+C to exit.")
+            print("==================================================")
+            try:
+                while True:
+                    query = input("[User] ")
+                    if query.lower() in ['exit', 'quit']:
+                        break
+                    response = ai.chat(query, max_tool_calls=10)
+                    print(f"[AI] {response}")
+            except (KeyboardInterrupt, EOFError):
+                print("\nExiting chat.")
 
-        for query in queries:
-            print("\n" + "="*50)
-            print(f"[Query] {query}")
-            response = ai.chat(query, max_tool_calls=10)
-            print(f"[Response] {response}")
-
+    except (FileNotFoundError, KeyError, RuntimeError) as e:
+        print(f"[ERROR] {e}", file=sys.stderr)
+        sys.exit(1)
     except Exception as e:
-        print(f"An error occurred: {str(e)}")
+        print(f"An unexpected error occurred: {str(e)}", file=sys.stderr)
+        traceback.print_exc()
+        sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -44,7 +44,7 @@ class GraphAIAgent:
 
     def _get_secrets_path(self) -> Path:
         """Get the path to the secrets.ini file."""
-        return Path.home() / ".config" / "secrets.ini"
+        return Path.home() / ".config" / "ai-thing" / "secrets.ini"
 
     def _read_secrets(self) -> Tuple[str, str]:
         """
@@ -100,7 +100,7 @@ class GraphAIAgent:
         except Exception as e:
             raise RuntimeError(
                 f"Failed to configure Google API: {str(e)}\n"
-                "Please ensure you have a valid Google API key in ~/.config/secrets.ini\n"
+                "Please ensure you have a valid Google API key in ~/.config/ai-thing/secrets.ini\n"
                 "with the following format:\n\n"
                 "[google]\n"
                 "api_key = your_google_api_key_here\n"
@@ -267,7 +267,7 @@ class GraphAIAgent:
         return result["response"]
 
 def main():
-    # The agent will automatically read API key and model from ~/.config/secrets.ini
+    # The agent will automatically read API key and model from ~/.config/ai-thing/secrets.ini
     agent = GraphAIAgent()
 
     test_queries = [

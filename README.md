@@ -29,7 +29,7 @@ A sophisticated, conversational AI agent powered by Google's Gemini model. This 
     ```
 
 3.  **Configure Secrets**:
-    -   Create or edit the configuration file at `~/.config/secrets.ini`.
+    -   Create or edit the configuration file at `~/.config/ai-thing/secrets.ini`.
     -   Add your Google API key and define a secure working directory for the AI.
 
     **Example `secrets.ini`:**
@@ -80,7 +80,7 @@ The script will load the configured profile and start a chat session where you c
     -   `weather_tool.py`: Fetches weather data.
     -   `file_read_tool.py`: Handles reading files within the chroot jail.
     -   `file_full_write_tool.py`: Handles writing files within the chroot jail.
--   `~/.config/secrets.ini`: Local configuration for API keys and settings (not in repository).
+-   `~/.config/ai-thing/secrets.ini`: Local configuration for API keys and settings (not in repository).
 
 ## Notes
 
