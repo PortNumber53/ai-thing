@@ -138,20 +138,26 @@ class FileReadTool:
 
     def get_invocation_instructions(self) -> str:
         """Returns the specific instructions for how the LLM should invoke this tool."""
-        return """When you need to read a file, you MUST respond with a tool call in this exact format:
-/tool read_file({"file_path": "relative/path/to/file_within_chroot.txt"})
+        return f"""When you need to read a file, you MUST respond with a tool call in this exact format:
+/tool read_file({{"file_path": "path/to/file.txt"}})
+
+The 'file_path' can be:
+1. Relative to the secure working directory (e.g., "my_notes.txt", "project_alpha/data.csv").
+2. An absolute path (e.g., "/home/grimlock/tmp/important_data.txt"), but ONLY if this path resolves to a location *inside* the secure working directory ({self.chroot_dir}). Access to paths outside this secure directory will be denied.
 
 Examples:
 User: Show me the contents of config.json
-You: /tool read_file({"file_path": "config.json"})
+You: /tool read_file({{"file_path": "config.json"}})
+
+User: Read the file at {self.chroot_dir}/locations.txt
+You: /tool read_file({{"file_path": "{self.chroot_dir}/locations.txt"}})
 
 User: What's in lines 5-10 of script.py?
-You: /tool read_file({"file_path": "script.py", "start_line": 5, "end_line": 10})
+You: /tool read_file({{"file_path": "script.py", "start_line": 5, "end_line": 10}})
 
 Important:
-- The 'file_path' MUST be relative to a pre-configured secure directory (chroot jail).
-- Do NOT use absolute paths (e.g., /home/user/file.txt).
-- Do NOT attempt to access files outside this secure directory (e.g., using '../' to go up levels).
+- All file access is restricted to the secure directory: {self.chroot_dir}
+- Do NOT attempt to access files outside this secure directory (e.g., using '../' to go to a parent directory of the secure root, or specifying an absolute path outside it).
 - The response MUST start with '/tool read_file('
 - The arguments MUST be valid JSON.
 - The 'file_path' parameter is REQUIRED.
