@@ -56,9 +56,10 @@ class GoogleAIIntegration:
         self.chroot_dir: Optional[Path] = None
         self.mcp_config_file_path: Optional[Path] = None
         self.mcp_server_configs: Dict[str, Dict[str, Any]] = {}
+        self.mcp_server_tools_info: Dict[str, List[Dict[str, str]]] = {}
         self.active_profile_name: Optional[str] = None
         self.google_ai_api_key: Optional[str] = None
-        
+
         self._configure_gemini()
         self._load_mcp_configurations()
         self._load_tools()
@@ -207,8 +208,21 @@ class GoogleAIIntegration:
             else:
                 self.mcp_server_configs = data['mcpServers']
                 print(f"[INFO] Successfully loaded {len(self.mcp_server_configs)} MCP server configurations from {self.mcp_config_file_path}.")
-                for server_name in self.mcp_server_configs.keys():
+                self.mcp_server_tools_info = {}
+                for server_name, server_config in self.mcp_server_configs.items():
                     print(f"  - Found MCP server: {server_name}")
+                    if 'provided_tools' in server_config and isinstance(server_config['provided_tools'], list):
+                        server_tools = []
+                        for tool_info in server_config['provided_tools']:
+                            if isinstance(tool_info, dict) and 'name' in tool_info and 'description' in tool_info:
+                                server_tools.append({'name': str(tool_info['name']), 'description': str(tool_info['description'])})
+                            else:
+                                print(f"    [WARNING] Invalid tool info format for server '{server_name}': {tool_info}. Skipping.")
+                        if server_tools:
+                            self.mcp_server_tools_info[server_name] = server_tools
+                            print(f"    - Loaded {len(server_tools)} tools for MCP server '{server_name}'.")
+                    elif 'provided_tools' in server_config:
+                        print(f"    [WARNING] 'provided_tools' for server '{server_name}' is not a list. Skipping MCP tool loading for this server.")
 
         except json.JSONDecodeError:
             print(f"[WARNING] Invalid JSON in MCP configuration file: {self.mcp_config_file_path}. MCP support may not work correctly.")
@@ -468,6 +482,48 @@ class GoogleAIIntegration:
             # Fallback to a simple text response if the function call fails
             return chat.send_message(f"Error in {function_name or 'unknown'}: {error_msg}")
 
+    def _get_tool_list_summary(self) -> str:
+        """Generates a summary of available local and MCP tools."""
+        summary_lines = ["Available Tools Summary:"]
+
+        # Local Tools
+        summary_lines.append("\nLocal Tools:")
+        if self.tools:
+            for func_name, tool_instance in self.tools.items():
+                tool_desc = "(No description available)"
+                if hasattr(tool_instance, 'get_summary') and callable(tool_instance.get_summary):
+                    try:
+                        tool_desc = tool_instance.get_summary()
+                    except Exception as e:
+                        tool_desc = f"(Error getting summary: {e})"
+                elif hasattr(tool_instance, 'get_definition') and callable(tool_instance.get_definition):
+                    try:
+                        definition = tool_instance.get_definition()
+                        if definition and definition.get('function_declarations'):
+                            desc_from_def = definition['function_declarations'][0].get('description')
+                            if desc_from_def:
+                                tool_desc = desc_from_def
+                    except Exception as e:
+                        tool_desc = f"(Error getting description from definition: {e})"
+                summary_lines.append(f"  - {func_name}: {tool_desc}")
+        else:
+            summary_lines.append("  (No local tools loaded)")
+
+        # MCP Server Tools
+        summary_lines.append("\nMCP Server Tools:")
+        if self.mcp_server_tools_info:
+            for server_name, tools_list in self.mcp_server_tools_info.items():
+                summary_lines.append(f"  Server '{server_name}':")
+                if tools_list:
+                    for tool_info in tools_list:
+                        summary_lines.append(f"    - {tool_info['name']}: {tool_info['description']}")
+                else:
+                    summary_lines.append("    (No tools listed for this server)")
+        else:
+            summary_lines.append("  (No MCP server tools configured or loaded)")
+
+        return "\n".join(summary_lines)
+
     def chat(self, prompt: str, max_tool_calls: int = 5) -> str:
         """
         Process a user's message and return the model's response, supporting multi-turn tool calls.
@@ -508,6 +564,8 @@ class GoogleAIIntegration:
                     return f"Sorry, I couldn't find help for '{help_tool_name}'. Available tools are: {available_tools_str if available_tools_str else 'None'}."
             else:
                 return "Usage: /help <tool_name>\nExample: /help get_weather"
+        elif prompt.strip().lower() == "/tool list":
+            return self._get_tool_list_summary()
 
         try:
             if self.chat_session is None:
@@ -648,19 +706,20 @@ Examples:
   - Start interactive chat: python google_ai_integration.py
   - Run a single query: python google_ai_integration.py "What is the weather in London?"
   - Show config info: python google_ai_integration.py info
+  - List available tools: python google_ai_integration.py tools list
 """
     )
-    
+
     parser.add_argument(
         'args',
         nargs='*',
         help="A command ('info') or a query to send to the AI. If omitted, starts an interactive session."
     )
-    
+
     parser.add_argument(
-        '--profile', 
-        type=str, 
-        default=None, 
+        '--profile',
+        type=str,
+        default=None,
         help='Specify a configuration profile to use from secrets.ini.'
     )
 
@@ -674,6 +733,12 @@ Examples:
                 print(f"[ERROR] The 'info' command does not take additional arguments. You provided: {' '.join(args.args[1:])}", file=sys.stderr)
                 sys.exit(1)
             ai.display_info()
+        elif args.args and len(args.args) >= 2 and args.args[0] == 'tools' and args.args[1] == 'list':
+            if len(args.args) > 2:
+                print(f"[ERROR] The 'tools list' command does not take additional arguments. You provided: {' '.join(args.args[2:])}", file=sys.stderr)
+                sys.exit(1)
+            tool_summary = ai._get_tool_list_summary()
+            print(tool_summary)
         elif args.args:
             query_text = " ".join(args.args)
             print(f"[User] {query_text}")
