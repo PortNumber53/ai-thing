@@ -60,21 +60,34 @@ class FileFullWriteTool:
 
     def get_invocation_instructions(self) -> str:
         """Returns the specific instructions for how the LLM should invoke this tool."""
-        return """When you need to write content to a file, you MUST respond with a tool call in this exact format:
-/tool write_file_full({"file_path": "relative/path/to/your/file.txt", "file_contents": "This is the content...", "override": false, "preserve_original": true})
+        return f"""When you need to write content to a file, you MUST respond with a tool call in this exact format:
+/tool write_file_full({{"file_path": "path/to/your/file.txt", "file_contents": "This is the content...", "override": false, "preserve_original": true}})
+
+The 'file_path' can be:
+1. Relative to the secure working directory (e.g., "output.log", "results/summary.csv").
+2. An absolute path (e.g., "/home/grimlock/tmp/report.txt"), but ONLY if this path resolves to a location *inside* the secure working directory ({self.chroot_dir}). Access to paths outside this secure directory will be denied.
+
+Examples:
+User: Write "Hello" to notes.txt
+You: /tool write_file_full({{"file_path": "notes.txt", "file_contents": "Hello"}})
+
+User: Save the report to {self.chroot_dir}/final_report.md with content "Done"
+You: /tool write_file_full({{"file_path": "{self.chroot_dir}/final_report.md", "file_contents": "Done", "override": true}})
 
 Important:
-- The 'file_path' MUST be relative to a pre-configured secure directory (chroot jail).
-- Do NOT use absolute paths (e.g., /home/user/file.txt).
-- Do NOT attempt to access files outside this secure directory (e.g., using '../' to go up levels).
+- All file access is restricted to the secure directory: {self.chroot_dir}
+- Do NOT attempt to access files outside this secure directory.
 - 'file_path' and 'file_contents' are REQUIRED.
 - 'override' (default: false): Set to true to overwrite an existing file if 'preserve_original' is false.
 - 'preserve_original' (default: false): Set to true to rename an existing file with a timestamp before writing.
-- If the file does not exist, it will be created (within the chroot jail).
-- If the file exists, 'preserve_original' takes precedence. If true, the original is renamed.
-- If 'preserve_original' is false and 'override' is false (default), an error occurs if the file exists.
-- If 'preserve_original' is false and 'override' is true, the existing file is overwritten.
-"""
+- If the file does not exist, it will be created (within the secure directory). Parent directories will be created if they don't exist.
+- If the file exists:
+    - If 'preserve_original' is true, the original is renamed (e.g., file.txt.YYYYMMDDHHMMSS.bak).
+    - Else if 'override' is true, the file is overwritten.
+    - Else (both false), the operation will fail.
+- The response MUST start with '/tool write_file_full('
+- The arguments MUST be valid JSON.
+- Do NOT include any other text when you want to execute a tool."""
 
     def execute(self, file_path: str, file_contents: str, override: Optional[bool] = False, preserve_original: Optional[bool] = False) -> Dict[str, Any]:
         """
