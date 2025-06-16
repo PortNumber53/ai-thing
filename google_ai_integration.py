@@ -122,8 +122,27 @@ class GoogleAIIntegration:
         return Path.home() / ".config" / "ai-thing" / "secrets.ini"
 
     def _load_profile_config(self, profile_name: Optional[str] = None) -> Tuple[str, str, str, str, Optional[str]]:
-        """
-        Load configuration from secrets.ini based on profiles.
+        """Load configuration from secrets.ini based on the provided or default profile.
+
+        Args:
+            profile_name: Optional name of the profile to load. If None,
+                          uses the 'profile' key from the '[default]' section or
+                          defaults to 'default'.
+
+        Returns:
+            A tuple containing:
+            - logical_profile_name (str): The name of the profile used.
+            - api_key (str): The Google AI API key.
+            - model_name (str): The model name.
+            - chroot_dir (str): The chroot directory path string.
+            - mcp_config_file_str (Optional[str]): Path to MCP config file, if any.
+
+        Raises:
+            FileNotFoundError: If secrets.ini is not found.
+            KeyError: If the '[default]' section is missing, or in a rare case,
+                      if the default profile section itself is missing after fallback.
+            ValueError: If mandatory keys ('google_ai_api_key', 'chroot') are not
+                        found in the resolved profile.
         """
         secrets_path = self._get_secrets_path()
         if not secrets_path.exists():
