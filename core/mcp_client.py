@@ -134,7 +134,10 @@ class MCPClient:
             token_response = requests.post(self.auth_config['token_url'], data=token_payload, auth=auth_tuple)
             token_response.raise_for_status()
             token_json = token_response.json()
-            self.access_token = token_json['access_token']
+            self.access_token = token_json.get('access_token')
+            if not self.access_token:
+                print(f"[ERROR] 'access_token' not found in response for '{self.server_name}'.")
+                return None
             print(f"[INFO] Successfully obtained access token for '{self.server_name}'.")
             return self.access_token
         except requests.exceptions.RequestException as e:
