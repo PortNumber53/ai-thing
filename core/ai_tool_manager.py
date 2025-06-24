@@ -1,17 +1,35 @@
 import importlib
 import inspect
 import traceback
+import atexit
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 
+from .mcp_client import MCPClient
+
+
+class RemoteToolExecutor:
+    """A proxy for executing a tool on a remote MCP server."""
+    def __init__(self, client: MCPClient, tool_name: str):
+        self.client = client
+        self.tool_name = tool_name
+
+    def execute(self, **kwargs):
+        """Executes the remote tool by calling the client."""
+        print(f"[INFO] Executing remote tool '{self.tool_name}' via MCP client for '{self.client.server_name}'.")
+        return self.client.execute_tool(self.tool_name, kwargs)
+
+
 class AIToolManager:
-    def __init__(self, chroot_dir: Optional[Path], model_name: str):
+    def __init__(self, chroot_dir: Optional[Path], model_name: str, mcp_server_configs: Optional[Dict[str, Any]] = None):
         self.chroot_dir = chroot_dir
         self.model_name = model_name
         self.tools: Dict[str, Any] = {}  # Stores tool_name -> tool_instance
         self.tool_definitions: List[Any] = []  # Stores raw tool definitions for Gemini
+        self.mcp_clients: Dict[str, MCPClient] = {}
 
         self._load_local_tools()
+        self._initialize_mcp_clients(mcp_server_configs)
 
     def _load_local_tools(self):
         """Dynamically load tools from the 'tools' subdirectory."""
@@ -73,3 +91,38 @@ class AIToolManager:
 
     def get_all_tools(self) -> Dict[str, Any]:
         return self.tools
+
+    def _initialize_mcp_clients(self, mcp_server_configs: Optional[Dict[str, Any]]):
+        if not mcp_server_configs:
+            return
+
+        print(f"[INFO] Initializing {len(mcp_server_configs)} MCP client(s)...")
+        for server_name, config in mcp_server_configs.items():
+            try:
+                client = MCPClient(server_name, config)
+                # Authenticate using the new direct authentication flow
+                if client.authenticate():
+                    self.mcp_clients[server_name] = client
+                    remote_tools = client.list_tools()
+                    for tool_def in remote_tools:
+                        tool_name = tool_def.get('name')
+                        if not tool_name:
+                            print(f"[WARNING] Remote tool from '{server_name}' is missing a name. Skipping.")
+                            continue
+
+                        gemini_def = {
+                            "function_declarations": [{
+                                "name": tool_name,
+                                "description": tool_def.get('description', ''),
+                                "parameters": tool_def.get('inputSchema', {'type': 'object', 'properties': {}})
+                            }]
+                        }
+                        self.tool_definitions.append(gemini_def)
+                        self.tools[tool_name] = RemoteToolExecutor(client, tool_name)
+                        print(f"[INFO] Loaded remote tool: {tool_name} from MCP server '{server_name}'")
+                else:
+                    print(f"[ERROR] Failed to authenticate with MCP server '{server_name}'. It will be unavailable.")
+            except ValueError as e:
+                print(f"[ERROR] Failed to initialize MCP client for '{server_name}': {e}")
+            except Exception as e:
+                print(f"[ERROR] An unexpected error occurred while setting up MCP client for '{server_name}': {e}")
