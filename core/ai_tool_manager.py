@@ -118,6 +118,8 @@ class AIToolManager:
                             }]
                         }
                         self.tool_definitions.append(gemini_def)
+                        if tool_name in self.tools:
+                            print(f"[WARNING] Tool name collision: A tool named '{tool_name}' is already loaded. The one from MCP server '{server_name}' will overwrite it.")
                         self.tools[tool_name] = RemoteToolExecutor(client, tool_name)
                         print(f"[INFO] Loaded remote tool: {tool_name} from MCP server '{server_name}'")
                 else:
