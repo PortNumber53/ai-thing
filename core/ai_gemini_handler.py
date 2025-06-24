@@ -181,7 +181,7 @@ class GeminiChatHandler:
         if not self.chat_session or not self.model:
             return "Error: Chat session or model not initialized."
 
-        print(f"\n[User] {prompt}")
+        print(f"\n[User entered] {prompt}")
 
         if prompt.strip().lower().startswith("/help"):
             parts = prompt.strip().split()

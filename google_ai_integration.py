@@ -39,7 +39,8 @@ class GoogleAIIntegration:
         self.tool_manager = AIToolManager(
             chroot_dir=self.config_manager.chroot_dir,
             model_name=final_model_name,
-            mcp_server_configs=self.config_manager.mcp_server_configs
+            mcp_server_configs=self.config_manager.mcp_server_configs,
+            brave_api_key=self.config_manager.brave_api_key
         )
         self.gemini_handler = GeminiChatHandler(
             config_manager=self.config_manager,
@@ -119,10 +120,15 @@ Examples:
                 print(f"[ERROR] The 'tools list' command does not take additional arguments. You provided: {' '.join(args.args[2:])}", file=sys.stderr)
                 sys.exit(1)
             ai.list_tools()
+        elif args.args and args.args[0] == 'chat':
+            if len(args.args) > 1:
+                print(f"[WARNING] The 'chat' command does not take additional arguments. You provided: {' '.join(args.args[1:])}. These will be ignored.", file=sys.stderr)
+            # This block will now intentionally fall through to the interactive chat session
+            pass
         elif args.args:
             query_text = " ".join(args.args)
             response = ai.chat(query_text)
-        else:
+        if not args.args or (args.args and args.args[0] == 'chat'):
             print("\n==================================================")
             print("Entering interactive chat mode. Press Ctrl+C to exit.")
             print("==================================================")
