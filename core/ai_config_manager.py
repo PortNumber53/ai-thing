@@ -13,6 +13,7 @@ class AIConfigManager:
 
         self.active_profile_name: Optional[str] = None
         self.google_ai_api_key: Optional[str] = None
+        self.brave_api_key: Optional[str] = None
         self.model_name: str = model_name_default
         self.chroot_dir: Optional[Path] = None
         self.mcp_config_file_path: Optional[Path] = None
@@ -26,7 +27,7 @@ class AIConfigManager:
         """Get the path to the secrets.ini file."""
         return Path.home() / ".config" / "ai-thing" / "secrets.ini"
 
-    def _load_profile_config(self, profile_name: Optional[str] = None) -> Tuple[str, str, str, str, Optional[str]]:
+    def _load_profile_config(self, profile_name: Optional[str] = None) -> Tuple[str, str, Optional[str], str, str, Optional[str]]:
         """Load configuration from secrets.ini based on the provided or default profile."""
         secrets_path = self._get_secrets_path()
         if not secrets_path.exists():
@@ -62,8 +63,9 @@ class AIConfigManager:
 
         model_name_from_config = get_value('google_ai_model') or self.model_name_default
         mcp_config_file_str = get_value('mcp_config_file')
+        brave_api_key = get_value('brave_api_key')
 
-        return logical_profile_name, api_key, model_name_from_config, chroot_dir_str, mcp_config_file_str
+        return logical_profile_name, api_key, brave_api_key, model_name_from_config, chroot_dir_str, mcp_config_file_str
 
     def _initialize_configurations(self):
         """
@@ -73,6 +75,7 @@ class AIConfigManager:
             (
                 self.active_profile_name,
                 self.google_ai_api_key,
+                self.brave_api_key,
                 self.model_name,
                 chroot_dir_str,
                 mcp_config_file_str
@@ -159,6 +162,12 @@ class AIConfigManager:
         else:
             redacted_key = "Not Set"
         print(f"Google API Key: {redacted_key}")
+
+        if self.brave_api_key:
+            redacted_brave_key = self.brave_api_key[:4] + "****" + self.brave_api_key[-4:]
+        else:
+            redacted_brave_key = "Not Set"
+        print(f"Brave API Key: {redacted_brave_key}")
         print(f"Model: {self.model_name}")
         print(f"Chroot Directory: {self.chroot_dir}")
         print(f"MCP Config File: {self.mcp_config_file_path}")

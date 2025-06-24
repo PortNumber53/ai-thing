@@ -21,9 +21,10 @@ class RemoteToolExecutor:
 
 
 class AIToolManager:
-    def __init__(self, chroot_dir: Optional[Path], model_name: str, mcp_server_configs: Optional[Dict[str, Any]] = None):
+    def __init__(self, chroot_dir: Optional[Path], model_name: str, mcp_server_configs: Optional[Dict[str, Any]] = None, brave_api_key: Optional[str] = None):
         self.chroot_dir = chroot_dir
         self.model_name = model_name
+        self.brave_api_key = brave_api_key
         self.tools: Dict[str, Any] = {}  # Stores tool_name -> tool_instance
         self.tool_definitions: List[Any] = []  # Stores raw tool definitions for Gemini
         self.mcp_clients: Dict[str, MCPClient] = {}
@@ -62,6 +63,14 @@ class AIToolManager:
                         elif 'base_path' in init_params:
                             print(f"[INFO] Tool {name} uses 'base_path', setting to CWD. Consider updating to 'chroot_dir' if it performs file ops.")
                             tool_instance_args['base_path'] = str(Path.cwd())
+
+                        if name == 'WebSearchTool':
+                            if 'brave_api_key' in init_params:
+                                if self.brave_api_key:
+                                    tool_instance_args['brave_api_key'] = self.brave_api_key
+                                else:
+                                    print(f"[WARNING] WebSearchTool requires a Brave API key, but it was not provided. Skipping tool.")
+                                    continue
 
                         tool_instance = obj(**tool_instance_args)
                         tool_def = tool_instance.get_definition()
