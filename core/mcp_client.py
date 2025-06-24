@@ -20,8 +20,15 @@ class MCPClient:
         self.access_token: Optional[str] = None
         self.tools: List[Dict[str, Any]] = []
         
-        if not self.url or not self.auth_config:
-            raise ValueError(f"MCP configuration for '{server_name}' is missing 'url' or 'auth' details.")
+        if not self.url:
+            raise ValueError(f"MCP configuration for '{server_name}' is missing 'url'.")
+        if not self.auth_config:
+            raise ValueError(f"MCP configuration for '{server_name}' is missing 'auth' details.")
+
+        required_auth_keys = ['client_id', 'auth_url', 'token_url']
+        missing_keys = [key for key in required_auth_keys if key not in self.auth_config]
+        if missing_keys:
+            raise ValueError(f"MCP auth configuration for '{server_name}' is missing required keys: {', '.join(missing_keys)}")
 
     def authenticate(self) -> bool:
         """
