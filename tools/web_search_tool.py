@@ -20,7 +20,7 @@ class WebSearchTool:
     """A tool for performing web searches and returning the clean text content of a page."""
 
     _last_call_time: float = 0
-    _monthly_quota: int = 2000
+    _MONTHLY_QUOTA_LIMIT: int = 2000
 
     def __init__(self, brave_api_key: Optional[str] = None):
         """Initializes the WebSearchTool."""
