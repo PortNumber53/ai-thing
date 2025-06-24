@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional
 
 from .mcp_client import MCPClient
+from .ai_type_definitions import AITool
 
 
 class RemoteToolExecutor:
@@ -25,8 +26,8 @@ class AIToolManager:
         self.chroot_dir = chroot_dir
         self.model_name = model_name
         self.brave_api_key = brave_api_key
-        self.tools: Dict[str, Any] = {}  # Stores tool_name -> tool_instance
-        self.tool_definitions: List[Any] = []  # Stores raw tool definitions for Gemini
+        self.tools: Dict[str, Any] = {}  # Stores tool_name -> tool_instance or callable
+        self.function_declarations: List[Dict[str, Any]] = []  # Stores individual function declarations
         self.mcp_clients: Dict[str, MCPClient] = {}
 
         self._load_local_tools()
@@ -34,7 +35,6 @@ class AIToolManager:
 
     def _load_local_tools(self):
         """Dynamically load tools from the 'tools' subdirectory."""
-        # Assumes this file (ai_tool_manager.py) is in the project root alongside the 'tools' directory.
         tools_dir = Path(__file__).parent.parent / "tools"
         if not tools_dir.is_dir():
             print(f"[WARNING] Tools directory not found: {tools_dir}")
@@ -45,7 +45,36 @@ class AIToolManager:
             try:
                 module = importlib.import_module(module_name)
                 for name, obj in inspect.getmembers(module):
-                    if inspect.isclass(obj) and obj.__module__ == module_name and hasattr(obj, 'get_definition') and hasattr(obj, 'execute'):
+                    # Handle AITool objects
+                    if isinstance(obj, AITool):
+                        tool_name = obj.name
+                        tool_func = obj.func
+                        tool_params = inspect.signature(tool_func).parameters
+
+                        wrapped_func = tool_func
+                        if 'chroot_path' in tool_params:
+                            if self.chroot_dir:
+                                # Create a closure to capture the current tool_func
+                                def create_chroot_wrapper(func):
+                                    def wrapper(**kwargs):
+                                        return func(chroot_path=str(self.chroot_dir), **kwargs)
+                                    return wrapper
+                                wrapped_func = create_chroot_wrapper(tool_func)
+                            else:
+                                print(f"[CRITICAL_ERROR] Chroot directory not configured for {tool_name} but it's required. Skipping tool loading.")
+                                continue
+                        
+                        self.tools[tool_name] = wrapped_func
+                        declaration = {
+                            "name": tool_name,
+                            "description": obj.description,
+                            "parameters": obj.parameters
+                        }
+                        self.function_declarations.append(declaration)
+                        print(f"[INFO] Loaded AITool: {tool_name} from {module_name}")
+
+                    # Handle legacy class-based tools
+                    elif inspect.isclass(obj) and obj.__module__ == module_name and hasattr(obj, 'get_definition') and hasattr(obj, 'execute'):
                         tool_instance_args = {}
                         init_params = inspect.signature(obj.__init__).parameters
                         if 'user_agent' in init_params:
@@ -76,13 +105,14 @@ class AIToolManager:
                         tool_def = tool_instance.get_definition()
 
                         if tool_def and tool_def.get('function_declarations'):
-                            func_name = tool_def['function_declarations'][0].get('name')
-                            if func_name:
-                                self.tools[func_name] = tool_instance
-                                self.tool_definitions.append(tool_def)
-                                print(f"[INFO] Loaded tool: {func_name} from {module_name}")
-                            else:
-                                print(f"[WARNING] Tool {name} in {module_name} has no function name in definition.")
+                            for declaration in tool_def['function_declarations']:
+                                func_name = declaration.get('name')
+                                if func_name:
+                                    self.tools[func_name] = tool_instance
+                                    self.function_declarations.append(declaration)
+                                    print(f"[INFO] Loaded tool: {func_name} from {module_name}")
+                                else:
+                                    print(f"[WARNING] Tool {name} in {module_name} has no function name in definition.")
                         else:
                             print(f"[WARNING] Tool {name} in {module_name} has no definition.")
             except ModuleNotFoundError:
@@ -95,8 +125,11 @@ class AIToolManager:
     def get_tool_instance(self, tool_name: str) -> Optional[Any]:
         return self.tools.get(tool_name)
 
-    def get_all_tool_definitions(self) -> List[Any]:
-        return self.tool_definitions
+    def get_all_tool_definitions(self) -> Optional[List[Any]]:
+        """Returns a list containing a single Tool object, if any functions are declared."""
+        if not self.function_declarations:
+            return None
+        return [{'function_declarations': self.function_declarations}]
 
     def get_all_tools(self) -> Dict[str, Any]:
         return self.tools
@@ -119,14 +152,13 @@ class AIToolManager:
                             print(f"[WARNING] Remote tool from '{server_name}' is missing a name. Skipping.")
                             continue
 
-                        gemini_def = {
-                            "function_declarations": [{
-                                "name": tool_name,
-                                "description": tool_def.get('description', ''),
-                                "parameters": tool_def.get('inputSchema', {'type': 'object', 'properties': {}})
-                            }]
+                        declaration = {
+                            "name": tool_name,
+                            "description": tool_def.get('description', ''),
+                            "parameters": tool_def.get('inputSchema', {'type': 'object', 'properties': {}})
                         }
-                        self.tool_definitions.append(gemini_def)
+                        self.function_declarations.append(declaration)
+
                         if tool_name in self.tools:
                             print(f"[WARNING] Tool name collision: A tool named '{tool_name}' is already loaded. The one from MCP server '{server_name}' will overwrite it.")
                         self.tools[tool_name] = RemoteToolExecutor(client, tool_name)

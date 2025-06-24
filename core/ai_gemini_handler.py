@@ -35,7 +35,7 @@ class GeminiChatHandler:
 
         self.model = genai.GenerativeModel(
             model_name=self.config_manager.model_name,
-            tools=tool_definitions if tool_definitions else None,
+            tools=tool_definitions,
             safety_settings=self._get_safety_settings(),
             system_instruction=self._get_system_instruction()
         )
@@ -223,9 +223,9 @@ class GeminiChatHandler:
                     print(f"\n[AI] Tool requested: {tool_name} with args: {tool_args}")
 
                     tool_instance = self.tool_manager.get_tool_instance(tool_name)
-                    tool_response_content_dict: Dict[str, Any]
 
-                    if tool_instance and hasattr(tool_instance, 'execute'):
+                    # Handle legacy class-based tools with an .execute() method
+                    if tool_instance and hasattr(tool_instance, 'execute') and callable(getattr(tool_instance, 'execute')):
                         try:
                             tool_output = tool_instance.execute(**tool_args)
                             if not isinstance(tool_output, dict):
@@ -235,6 +235,20 @@ class GeminiChatHandler:
                                 tool_response_content_dict = tool_output
                         except Exception as e:
                             error_msg = f"Error executing tool {tool_name}: {str(e)}"
+                            print(f"\n[ERROR] {error_msg}")
+                            traceback.print_exc()
+                            tool_response_content_dict = {'error': error_msg}
+                    # Handle new AITool functions which are directly callable
+                    elif tool_instance and callable(tool_instance):
+                        try:
+                            tool_output = tool_instance(**tool_args)
+                            if not isinstance(tool_output, dict):
+                                print(f"[WARN] Tool {tool_name} did not return a dict. Wrapping: {tool_output}")
+                                tool_response_content_dict = {"result": str(tool_output)}
+                            else:
+                                tool_response_content_dict = tool_output
+                        except Exception as e:
+                            error_msg = f"Error executing callable tool {tool_name}: {str(e)}"
                             print(f"\n[ERROR] {error_msg}")
                             traceback.print_exc()
                             tool_response_content_dict = {'error': error_msg}
