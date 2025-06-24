@@ -38,7 +38,8 @@ class GoogleAIIntegration:
 
         self.tool_manager = AIToolManager(
             chroot_dir=self.config_manager.chroot_dir,
-            model_name=final_model_name
+            model_name=final_model_name,
+            mcp_server_configs=self.config_manager.mcp_server_configs
         )
         self.gemini_handler = GeminiChatHandler(
             config_manager=self.config_manager,
