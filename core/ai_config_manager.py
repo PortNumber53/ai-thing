@@ -4,12 +4,14 @@ import sys
 from pathlib import Path
 from typing import Optional, Dict, Any, Tuple, List
 
-import google.generativeai as genai
-
 class AIConfigManager:
+    MCP_CLIENT_IDS_SECTION = 'mcp_client_ids'
+    MCP_ACCESS_TOKENS_SECTION = 'mcp_access_tokens'
+    MCP_CLIENT_SECRETS_SECTION = 'mcp_client_secrets'
     def __init__(self, profile_name: Optional[str] = None, model_name_default: str = "gemini-1.5-flash-preview-0514"):
         self.profile_name = profile_name
         self.model_name_default = model_name_default
+        self.secrets_file_path = self._get_secrets_path()
 
         self.active_profile_name: Optional[str] = None
         self.google_ai_api_key: Optional[str] = None
@@ -81,17 +83,21 @@ class AIConfigManager:
                 mcp_config_file_str
             ) = self._load_profile_config(profile_name=self.profile_name)
 
+            if not mcp_config_file_str:
+                project_root = Path(__file__).parent.parent
+                default_mcp_config_path = project_root / "mcp-servers.json"
+                print(f"[INFO] 'mcp_config_file' not found in secrets.ini, defaulting to {default_mcp_config_path}")
+                mcp_config_file_str = str(default_mcp_config_path)
+
             if not self.google_ai_api_key:
                  raise ValueError("Google AI API key not configured.")
-            genai.configure(api_key=self.google_ai_api_key)
+            # genai.configure(api_key=self.google_ai_api_key)
 
             if chroot_dir_str:
                 self.chroot_dir = Path(chroot_dir_str).resolve()
                 if not self.chroot_dir.exists() or not self.chroot_dir.is_dir():
-                    raise FileNotFoundError(f"Chroot directory '{self.chroot_dir}' does not exist or is not a directory.")
-            else:
-                raise ValueError("Chroot directory not configured.")
-
+                    print(f"[WARNING] Chroot directory '{self.chroot_dir}' does not exist or is not a directory. Some tools may fail.", file=sys.stderr)
+            
             if mcp_config_file_str:
                 self.mcp_config_file_path = Path(mcp_config_file_str).expanduser().resolve()
             else:
@@ -151,6 +157,57 @@ class AIConfigManager:
         except Exception as e:
             print(f"[WARNING] Error loading MCP configuration file {self.mcp_config_file_path}: {e}. MCP support may not work correctly.")
             self.mcp_server_configs = {}
+
+    def get_mcp_client_id(self, server_name: str) -> str | None:
+        """Gets the registered client_id for an MCP server."""
+        config = configparser.ConfigParser()
+        config.read(self.secrets_file_path)
+        return config.get(self.MCP_CLIENT_IDS_SECTION, server_name, fallback=None)
+
+    def set_mcp_client_id(self, server_name: str, client_id: str):
+        """Sets and saves the registered client_id for an MCP server."""
+        config = configparser.ConfigParser()
+        config.read(self.secrets_file_path)
+        if not config.has_section(self.MCP_CLIENT_IDS_SECTION):
+            config.add_section(self.MCP_CLIENT_IDS_SECTION)
+        config.set(self.MCP_CLIENT_IDS_SECTION, server_name, client_id)
+        with open(self.secrets_file_path, 'w') as configfile:
+            config.write(configfile)
+        print(f"[INFO] Saved new client_id for '{server_name}' to {self.secrets_file_path}")
+
+    def get_mcp_access_token(self, server_name: str) -> str | None:
+        """Gets the access token for an MCP server."""
+        config = configparser.ConfigParser()
+        config.read(self.secrets_file_path)
+        return config.get(self.MCP_ACCESS_TOKENS_SECTION, server_name, fallback=None)
+
+    def set_mcp_access_token(self, server_name: str, token: str):
+        """Sets and saves the access token for an MCP server."""
+        config = configparser.ConfigParser()
+        config.read(self.secrets_file_path)
+        if not config.has_section(self.MCP_ACCESS_TOKENS_SECTION):
+            config.add_section(self.MCP_ACCESS_TOKENS_SECTION)
+        config.set(self.MCP_ACCESS_TOKENS_SECTION, server_name, token)
+        with open(self.secrets_file_path, 'w') as configfile:
+            config.write(configfile)
+        print(f"[INFO] Saved new access token for '{server_name}' to {self.secrets_file_path}")
+
+    def get_mcp_client_secret(self, server_name: str) -> str | None:
+        """Gets the client_secret for an MCP server."""
+        config = configparser.ConfigParser()
+        config.read(self.secrets_file_path)
+        return config.get(self.MCP_CLIENT_SECRETS_SECTION, server_name, fallback=None)
+
+    def set_mcp_client_secret(self, server_name: str, client_secret: str):
+        """Sets and saves the client_secret for an MCP server."""
+        config = configparser.ConfigParser()
+        config.read(self.secrets_file_path)
+        if not config.has_section(self.MCP_CLIENT_SECRETS_SECTION):
+            config.add_section(self.MCP_CLIENT_SECRETS_SECTION)
+        config.set(self.MCP_CLIENT_SECRETS_SECTION, server_name, client_secret)
+        with open(self.secrets_file_path, 'w') as configfile:
+            config.write(configfile)
+        print(f"[INFO] Saved new client_secret for '{server_name}' to {self.secrets_file_path}", flush=True)
 
     def display_info(self):
         """Displays the current configuration, redacting sensitive information."""

@@ -9,7 +9,6 @@ from typing import Optional
 
 from core.ai_config_manager import AIConfigManager
 from core.ai_tool_manager import AIToolManager
-from core.ai_gemini_handler import GeminiChatHandler
 
 class GoogleAIIntegration:
     """
@@ -36,9 +35,23 @@ class GoogleAIIntegration:
             print(f"[INFO] Overriding model from config ('{self.config_manager.model_name}') with CLI argument: '{model_name_override}'")
             self.config_manager.model_name = model_name_override
 
+        self.tool_manager: Optional[AIToolManager] = None
+        self.gemini_handler: Optional['GeminiChatHandler'] = None
+
+        print("[INFO] GoogleAIIntegration initialized successfully.")
+
+    def _initialize_chat_components(self):
+        """Initializes the components required for chat and tool operations."""
+        if self.gemini_handler is not None:
+            return
+
+        from core.ai_gemini_handler import GeminiChatHandler
+
+        print("[INFO] Initializing chat and tool components...")
         self.tool_manager = AIToolManager(
+            config_manager=self.config_manager,
             chroot_dir=self.config_manager.chroot_dir,
-            model_name=final_model_name,
+            model_name=self.config_manager.model_name,
             mcp_server_configs=self.config_manager.mcp_server_configs,
             brave_api_key=self.config_manager.brave_api_key
         )
@@ -47,14 +60,13 @@ class GoogleAIIntegration:
             tool_manager=self.tool_manager
         )
 
-        print("[INFO] GoogleAIIntegration initialized successfully.")
-
     def display_info(self):
         """Displays the current configuration via the AIConfigManager."""
         self.config_manager.display_info()
 
     def list_tools(self):
         """Prints the summary of available tools via the GeminiChatHandler."""
+        self._initialize_chat_components()
         tool_summary = self.gemini_handler._get_tool_list_summary()
         print(tool_summary)
 
@@ -69,6 +81,7 @@ class GoogleAIIntegration:
         Returns:
             The model's final response.
         """
+        self._initialize_chat_components()
         return self.gemini_handler.chat(prompt, max_tool_calls=max_tool_calls)
 
 def main():
