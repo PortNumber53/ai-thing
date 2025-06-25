@@ -9,6 +9,9 @@ import traceback
 from typing import Dict, Any, Optional
 import nltk
 
+# Define a constant for the User-Agent string
+USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/111.0.0.0 Safari/537.36'
+
 # Ensure the 'punkt' tokenizer is downloaded for newspaper
 try:
     nltk.data.find('tokenizers/punkt')
@@ -136,7 +139,7 @@ Important:
             config = Config()
             config.request_timeout = 10  # Set a 10-second timeout
             # Set a user-agent to mimic a browser and avoid 401 Unauthorized errors
-            config.browser_user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/111.0.0.0 Safari/537.36'
+            config.browser_user_agent = USER_AGENT
 
             article = Article(str(url), config=config)
             print("[DEBUG] WebSearchTool: Downloading article...")
