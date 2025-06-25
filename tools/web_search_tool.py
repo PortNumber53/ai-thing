@@ -10,7 +10,7 @@ from typing import Dict, Any, Optional
 import nltk
 
 # Define a constant for the User-Agent string
-USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/111.0.0.0 Safari/537.36'
+USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
 
 # Ensure the 'punkt' tokenizer is downloaded for newspaper
 try:
