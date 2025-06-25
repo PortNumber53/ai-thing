@@ -107,8 +107,8 @@ Important:
             A dictionary containing the search result URL and its content, or an error.
         """
         # Check monthly quota
-        if self._usage_data["count"] >= self._monthly_quota:
-            error_msg = f"Brave Search API monthly quota of {self._monthly_quota} requests exceeded."
+        if self._usage_data["count"] >= self._MONTHLY_QUOTA_LIMIT:
+            error_msg = f"Brave Search API monthly quota of {self._MONTHLY_QUOTA_LIMIT} requests exceeded."
             print(f"[ERROR] {error_msg}")
             return {"error": error_msg}
 
@@ -135,6 +135,8 @@ Important:
 
             config = Config()
             config.request_timeout = 10  # Set a 10-second timeout
+            # Set a user-agent to mimic a browser and avoid 401 Unauthorized errors
+            config.browser_user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/111.0.0.0 Safari/537.36'
 
             article = Article(str(url), config=config)
             print("[DEBUG] WebSearchTool: Downloading article...")

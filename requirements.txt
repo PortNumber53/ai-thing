@@ -22,3 +22,4 @@ langchain-google-genai==2.0.10
 brave-search-python-client==0.4.27
 markdownify==0.11.6
 psutil==5.9.8
+lxml[html_clean]
