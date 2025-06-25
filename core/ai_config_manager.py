@@ -21,6 +21,12 @@ class AIConfigManager:
         self.mcp_config_file_path: Optional[Path] = None
         self.mcp_server_configs: Dict[str, Dict[str, Any]] = {}
         self.mcp_server_tools_info: Dict[str, List[Dict[str, str]]] = {}
+        self.safety_settings: List[Dict[str, Any]] = [
+            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
+            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
+            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
+            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
+        ]
 
         self._initialize_configurations()
         self._load_mcp_configurations()
@@ -226,6 +232,7 @@ class AIConfigManager:
             redacted_brave_key = "Not Set"
         print(f"Brave API Key: {redacted_brave_key}")
         print(f"Model: {self.model_name}")
+        print(f"Safety Settings: {json.dumps(self.safety_settings, indent=2)}")
         print(f"Chroot Directory: {self.chroot_dir}")
         print(f"MCP Config File: {self.mcp_config_file_path}")
         if self.mcp_server_configs:
