@@ -61,17 +61,24 @@ class AIToolManager:
                         tool_params = inspect.signature(tool_func).parameters
 
                         wrapped_func = tool_func
+                        wrapper_params = {}
                         if 'chroot_path' in tool_params:
                             if self.chroot_dir:
-                                def create_chroot_wrapper(func):
-                                    @functools.wraps(func)
-                                    def wrapper(**kwargs):
-                                        return func(chroot_path=str(self.chroot_dir), **kwargs)
-                                    return wrapper
-                                wrapped_func = create_chroot_wrapper(tool_func)
+                                wrapper_params['chroot_path'] = str(self.chroot_dir)
                             else:
                                 print(f"[CRITICAL_ERROR] Chroot directory not configured for {tool_name} but it's required. Skipping tool loading.")
                                 continue
+
+                        if 'config_manager' in tool_params:
+                            wrapper_params['config_manager'] = self.config_manager
+
+                        if wrapper_params:
+                            def create_wrapper(func, params):
+                                @functools.wraps(func)
+                                def wrapper(**kwargs):
+                                    return func(**params, **kwargs)
+                                return wrapper
+                            wrapped_func = create_wrapper(tool_func, wrapper_params)
                         
                         self.tools[tool_name] = wrapped_func
                         declaration = {
