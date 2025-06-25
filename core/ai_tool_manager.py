@@ -1,5 +1,6 @@
 import importlib
 import inspect
+import functools
 import traceback
 import atexit
 from pathlib import Path
@@ -56,6 +57,7 @@ class AIToolManager:
                             if self.chroot_dir:
                                 # Create a closure to capture the current tool_func
                                 def create_chroot_wrapper(func):
+                                    @functools.wraps(func)
                                     def wrapper(**kwargs):
                                         return func(chroot_path=str(self.chroot_dir), **kwargs)
                                     return wrapper
