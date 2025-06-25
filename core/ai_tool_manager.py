@@ -4,35 +4,43 @@ import functools
 import traceback
 import atexit
 from pathlib import Path
+import json
 from typing import Dict, Any, List, Optional
+from google.generativeai.types import Tool
 
 from .mcp_client import MCPClient
 from .ai_type_definitions import AITool
+from .ai_config_manager import AIConfigManager
 
 
 class RemoteToolExecutor:
     """A proxy for executing a tool on a remote MCP server."""
-    def __init__(self, client: MCPClient, tool_name: str):
+    def __init__(self, client: MCPClient, tool_name: str, supports_streaming: bool = False):
         self.client = client
         self.tool_name = tool_name
+        self.supports_streaming = supports_streaming
 
     def execute(self, **kwargs):
         """Executes the remote tool by calling the client."""
         print(f"[INFO] Executing remote tool '{self.tool_name}' via MCP client for '{self.client.server_name}'.")
-        return self.client.execute_tool(self.tool_name, kwargs)
+        # Pass the streaming preference to the client.
+        return self.client.execute_tool(self.tool_name, kwargs, use_streaming=self.supports_streaming)
 
 
 class AIToolManager:
-    def __init__(self, chroot_dir: Optional[Path], model_name: str, mcp_server_configs: Optional[Dict[str, Any]] = None, brave_api_key: Optional[str] = None):
+    def __init__(self, config_manager: AIConfigManager, chroot_dir: Optional[Path], model_name: str, mcp_server_configs: Optional[Dict[str, Any]] = None, brave_api_key: Optional[str] = None):
+        self.config_manager = config_manager
         self.chroot_dir = chroot_dir
         self.model_name = model_name
         self.brave_api_key = brave_api_key
-        self.tools: Dict[str, Any] = {}  # Stores tool_name -> tool_instance or callable
-        self.function_declarations: List[Dict[str, Any]] = []  # Stores individual function declarations
+        self.tools: Dict[str, Any] = {}
+        self.function_declarations: List[Dict[str, Any]] = []
+        self.mcp_server_configs = mcp_server_configs
         self.mcp_clients: Dict[str, MCPClient] = {}
+        self.remote_tools_loaded = False
 
         self._load_local_tools()
-        self._initialize_mcp_clients(mcp_server_configs)
+        self._create_mcp_clients()
 
     def _load_local_tools(self):
         """Dynamically load tools from the 'tools' subdirectory."""
@@ -55,7 +63,6 @@ class AIToolManager:
                         wrapped_func = tool_func
                         if 'chroot_path' in tool_params:
                             if self.chroot_dir:
-                                # Create a closure to capture the current tool_func
                                 def create_chroot_wrapper(func):
                                     @functools.wraps(func)
                                     def wrapper(**kwargs):
@@ -81,37 +88,32 @@ class AIToolManager:
                         init_params = inspect.signature(obj.__init__).parameters
                         if 'user_agent' in init_params:
                             tool_instance_args['user_agent'] = f"google_ai_integration/{self.model_name}"
-
-                        if name in ['FileReadTool', 'FileFullWriteTool']:
-                            if 'chroot_dir' in init_params:
-                                if self.chroot_dir:
-                                    tool_instance_args['chroot_dir'] = self.chroot_dir
-                                else:
-                                    print(f"[CRITICAL_ERROR] Chroot directory not configured for {name} but it's required. Skipping tool loading.")
-                                    continue
+                        if 'chroot_dir' in init_params:
+                            if self.chroot_dir:
+                                tool_instance_args['chroot_dir'] = str(self.chroot_dir)
                             else:
-                                print(f"[WARNING] File tool {name} does not accept 'chroot_dir' in __init__. Update tool to support chroot.")
-                        elif 'base_path' in init_params:
-                            print(f"[INFO] Tool {name} uses 'base_path', setting to CWD. Consider updating to 'chroot_dir' if it performs file ops.")
-                            tool_instance_args['base_path'] = str(Path.cwd())
+                                print(f"[CRITICAL_ERROR] Chroot directory not configured for {name} but it's required. Skipping tool loading.")
+                                continue
+                        if 'brave_api_key' in init_params:
+                            if self.brave_api_key:
+                                tool_instance_args['brave_api_key'] = self.brave_api_key
 
-                        if name == 'WebSearchTool':
-                            if 'brave_api_key' in init_params:
-                                if self.brave_api_key:
-                                    tool_instance_args['brave_api_key'] = self.brave_api_key
-                                else:
-                                    print(f"[WARNING] WebSearchTool requires a Brave API key, but it was not provided. Skipping tool.")
-                                    continue
-
+                        if hasattr(obj, 'requires_brave_api_key') and obj.requires_brave_api_key:
+                            if self.brave_api_key:
+                                tool_instance_args['api_key'] = self.brave_api_key
+                            else:
+                                print(f"[WARNING] Tool {name} requires a Brave API key, but it's not configured. Skipping.")
+                                continue
+                        
                         tool_instance = obj(**tool_instance_args)
-                        tool_def = tool_instance.get_definition()
-
-                        if tool_def and tool_def.get('function_declarations'):
-                            for declaration in tool_def['function_declarations']:
-                                func_name = declaration.get('name')
+                        definition = tool_instance.get_definition()
+                        if definition:
+                            declarations = definition.get('function_declarations', [])
+                            if declarations:
+                                func_name = declarations[0].get('name')
                                 if func_name:
                                     self.tools[func_name] = tool_instance
-                                    self.function_declarations.append(declaration)
+                                    self.function_declarations.append(declarations[0])
                                     print(f"[INFO] Loaded tool: {func_name} from {module_name}")
                                 else:
                                     print(f"[WARNING] Tool {name} in {module_name} has no function name in definition.")
@@ -124,50 +126,116 @@ class AIToolManager:
                 print(f"[ERROR] Failed to load tool from {tool_file.name}: {e}")
                 traceback.print_exc()
 
-    def get_tool_instance(self, tool_name: str) -> Optional[Any]:
-        return self.tools.get(tool_name)
-
-    def get_all_tool_definitions(self) -> Optional[List[Any]]:
-        """Returns a list containing a single Tool object, if any functions are declared."""
-        if not self.function_declarations:
-            return None
-        return [{'function_declarations': self.function_declarations}]
-
-    def get_all_tools(self) -> Dict[str, Any]:
-        return self.tools
-
-    def _initialize_mcp_clients(self, mcp_server_configs: Optional[Dict[str, Any]]):
-        if not mcp_server_configs:
+    def _create_mcp_clients(self):
+        """Creates MCPClient instances and starts their proxies without listing tools."""
+        if not self.mcp_server_configs:
             return
 
-        print(f"[INFO] Initializing {len(mcp_server_configs)} MCP client(s)...")
-        for server_name, config in mcp_server_configs.items():
+        enabled_servers = {name: config for name, config in self.mcp_server_configs.items() if not config.get('disabled')}
+        
+        if not enabled_servers:
+            print("[INFO] No enabled MCP servers found in configuration.")
+            return
+
+        print(f"[INFO] Creating {len(enabled_servers)} MCP client(s)...")
+        for server_name, config in enabled_servers.items():
             try:
-                client = MCPClient(server_name, config)
-                # Authenticate using the new direct authentication flow
-                if client.authenticate():
-                    self.mcp_clients[server_name] = client
-                    remote_tools = client.list_tools()
+                client = MCPClient(server_name, config, self.config_manager)
+                self.mcp_clients[server_name] = client
+            except (ValueError, RuntimeError) as e:
+                print(f"[ERROR] Failed to create MCP client for '{server_name}': {e}")
+            except Exception as e:
+                print(f"[ERROR] An unexpected error occurred while initializing MCP client '{server_name}': {e}")
+                traceback.print_exc()
+
+    def _load_remote_tools(self):
+        """Lists tools from all MCP clients and registers them. This is the blocking part."""
+        if self.remote_tools_loaded or not self.mcp_clients:
+            return
+
+        print("[INFO] Loading remote tools from MCP clients...")
+        for server_name, client in self.mcp_clients.items():
+            try:
+                remote_tools = client.list_tools()
+
+                if remote_tools:
                     for tool_def in remote_tools:
                         tool_name = tool_def.get('name')
                         if not tool_name:
-                            print(f"[WARNING] Remote tool from '{server_name}' is missing a name. Skipping.")
+                            print(f"[WARNING] Skipping a remote tool from '{server_name}' because it has no name.")
                             continue
+
+
+
+                        input_schema = tool_def.get('inputSchema', {'type': 'object', 'properties': {}})
+                        # The Gemini API doesn't support 'additionalProperties' or '$schema' in the schema, so we remove them.
+                        if 'additionalProperties' in input_schema:
+                            del input_schema['additionalProperties']
+                        if '$schema' in input_schema:
+                            del input_schema['$schema']
+
+                        self._sanitize_schema(input_schema)
+
+                        # Sanitize top-level description by removing backticks
+                        description_raw = tool_def.get('description', '')
+                        description_sanitized = description_raw.replace('`', '')
 
                         declaration = {
                             "name": tool_name,
-                            "description": tool_def.get('description', ''),
-                            "parameters": tool_def.get('inputSchema', {'type': 'object', 'properties': {}})
+                            "description": description_sanitized,
+                            "parameters": input_schema
                         }
                         self.function_declarations.append(declaration)
 
+                        supports_streaming = tool_def.get('supportsStreaming', False)
+                        if supports_streaming:
+                            print(f"[INFO] Remote tool '{tool_name}' from '{server_name}' supports streaming.")
+
                         if tool_name in self.tools:
                             print(f"[WARNING] Tool name collision: A tool named '{tool_name}' is already loaded. The one from MCP server '{server_name}' will overwrite it.")
-                        self.tools[tool_name] = RemoteToolExecutor(client, tool_name)
+                        
+                        self.tools[tool_name] = RemoteToolExecutor(client, tool_name, supports_streaming)
                         print(f"[INFO] Loaded remote tool: {tool_name} from MCP server '{server_name}'")
-                else:
-                    print(f"[ERROR] Failed to authenticate with MCP server '{server_name}'. It will be unavailable.")
-            except ValueError as e:
-                print(f"[ERROR] Failed to initialize MCP client for '{server_name}': {e}")
             except Exception as e:
-                print(f"[ERROR] An unexpected error occurred while setting up MCP client for '{server_name}': {e}")
+                print(f"[ERROR] Failed to load tools from MCP client '{server_name}': {e}")
+        
+        self.remote_tools_loaded = True
+
+    def _sanitize_schema(self, schema: Dict[str, Any]):
+        """Recursively removes unsupported fields from the schema for Gemini API compatibility."""
+        # Fields to remove at any level
+        unsupported_keys = ['minimum', 'maximum', 'example', 'additionalProperties', '$schema', 'default', 'format', 'nullable']
+        for key in unsupported_keys:
+            if key in schema:
+                del schema[key]
+
+        # Sanitize description fields by removing backticks, which can confuse the model.
+        if 'description' in schema and isinstance(schema['description'], str):
+            schema['description'] = schema['description'].replace('`', '')
+
+        # Recurse into nested properties
+        if 'properties' in schema and isinstance(schema['properties'], dict):
+            for prop_name, prop_schema in list(schema['properties'].items()):
+                if isinstance(prop_schema, dict):
+                    self._sanitize_schema(prop_schema)
+
+        # Recurse into array items
+        if 'items' in schema and isinstance(schema['items'], dict):
+            self._sanitize_schema(schema['items'])
+
+    def get_tool_instance(self, tool_name: str) -> Optional[Any]:
+        return self.tools.get(tool_name)
+
+    def get_all_tool_definitions(self) -> List[Tool]:
+        if not self.remote_tools_loaded:
+            self._load_remote_tools()
+
+        if not self.function_declarations:
+            return []
+        return [Tool(function_declarations=self.function_declarations)]
+
+    def get_all_tools(self) -> Dict[str, Any]:
+        """Returns all tools, loading remote ones if necessary."""
+        if not self.remote_tools_loaded:
+            self._load_remote_tools()
+        return self.tools

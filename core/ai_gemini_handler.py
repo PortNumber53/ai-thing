@@ -4,6 +4,7 @@ import traceback
 from typing import Optional, Dict, Any, List, Union
 
 import google.generativeai as genai
+import time
 from google.generativeai.types import HarmCategory, HarmBlockThreshold
 
 from .ai_type_definitions import Part
@@ -27,11 +28,11 @@ class GeminiChatHandler:
 
     def _initialize_model_and_session(self):
         """Initialize the Gemini model and chat session."""
+        self._configure_genai()
         if not self.config_manager.google_ai_api_key:
             raise ValueError("Google AI API key not configured. Cannot initialize model.")
-        # genai.configure is called by AIConfigManager
-
         tool_definitions = self.tool_manager.get_all_tool_definitions()
+
 
         self.model = genai.GenerativeModel(
             model_name=self.config_manager.model_name,
@@ -41,6 +42,12 @@ class GeminiChatHandler:
         )
         self.chat_session = self.model.start_chat(history=[])
         print(f"[INFO] Gemini model '{self.config_manager.model_name}' initialized and chat session started.")
+
+    def _configure_genai(self):
+        """Configures the Google AI API key."""
+        if not self.config_manager.google_ai_api_key:
+            raise ValueError("Google AI API key not configured.")
+        genai.configure(api_key=self.config_manager.google_ai_api_key)
 
     def _get_safety_settings(self) -> List[Dict[str, Any]]:
         """Returns the safety settings for the model."""
@@ -178,6 +185,10 @@ class GeminiChatHandler:
         return "\n".join(summary_lines)
 
     def chat(self, prompt: str, max_tool_calls: int = 5) -> str:
+        if not prompt or not prompt.strip():
+            print("[AI] Please enter a message to continue.")
+            return
+
         if not self.chat_session or not self.model:
             return "Error: Chat session or model not initialized."
 
