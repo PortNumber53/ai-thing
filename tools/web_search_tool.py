@@ -9,6 +9,9 @@ import traceback
 from typing import Dict, Any, Optional
 import nltk
 
+# Define a constant for the User-Agent string
+USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
+
 # Ensure the 'punkt' tokenizer is downloaded for newspaper
 try:
     nltk.data.find('tokenizers/punkt')
@@ -107,8 +110,8 @@ Important:
             A dictionary containing the search result URL and its content, or an error.
         """
         # Check monthly quota
-        if self._usage_data["count"] >= self._monthly_quota:
-            error_msg = f"Brave Search API monthly quota of {self._monthly_quota} requests exceeded."
+        if self._usage_data["count"] >= self._MONTHLY_QUOTA_LIMIT:
+            error_msg = f"Brave Search API monthly quota of {self._MONTHLY_QUOTA_LIMIT} requests exceeded."
             print(f"[ERROR] {error_msg}")
             return {"error": error_msg}
 
@@ -133,8 +136,15 @@ Important:
             url = top_result.url
             print(f"[DEBUG] WebSearchTool: Found URL: {url}")
 
+            # SECURITY NOTE: newspaper4k uses lxml.html.clean for parsing, which is not
+            # recommended for security-critical applications. For the current use case of
+            # extracting text for an LLM, the risk is low. If this content were ever
+            # to be rendered in a browser, a more robust library like 'bleach' should
+            # be used for HTML sanitization to prevent XSS vulnerabilities.
             config = Config()
             config.request_timeout = 10  # Set a 10-second timeout
+            # Set a user-agent to mimic a browser and avoid 401 Unauthorized errors
+            config.browser_user_agent = USER_AGENT
 
             article = Article(str(url), config=config)
             print("[DEBUG] WebSearchTool: Downloading article...")
