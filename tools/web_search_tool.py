@@ -136,6 +136,11 @@ Important:
             url = top_result.url
             print(f"[DEBUG] WebSearchTool: Found URL: {url}")
 
+            # SECURITY NOTE: newspaper4k uses lxml.html.clean for parsing, which is not
+            # recommended for security-critical applications. For the current use case of
+            # extracting text for an LLM, the risk is low. If this content were ever
+            # to be rendered in a browser, a more robust library like 'bleach' should
+            # be used for HTML sanitization to prevent XSS vulnerabilities.
             config = Config()
             config.request_timeout = 10  # Set a 10-second timeout
             # Set a user-agent to mimic a browser and avoid 401 Unauthorized errors
