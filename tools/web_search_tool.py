@@ -99,7 +99,7 @@ Important:
 - The 'query' parameter is REQUIRED
 - Do NOT include any other text when you want to execute a tool"""
 
-    def execute(self, query: str) -> Dict[str, Any]:
+    async def execute(self, query: str) -> Dict[str, Any]:
         """
         Perform a web search and return the clean text content of the top result.
 
@@ -120,7 +120,7 @@ Important:
         if elapsed < 1.0:
             sleep_time = 1.0 - elapsed
             print(f"[DEBUG] WebSearchTool: Rate limiting. Sleeping for {sleep_time:.2f} seconds.")
-            time.sleep(sleep_time)
+            await asyncio.sleep(sleep_time)
 
         print(f"[DEBUG] WebSearchTool: Executing with query: '{query}'")
 
@@ -162,7 +162,7 @@ Important:
 
         try:
             # Add a 15-second timeout to the entire search process
-            result = asyncio.run(asyncio.wait_for(_search(), timeout=15.0))
+            result = await asyncio.wait_for(_search(), timeout=15.0)
             # On success, update timestamp and usage count
             self._last_call_time = time.time()
             if 'error' not in result:
