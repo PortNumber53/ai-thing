@@ -79,7 +79,7 @@ class AIToolManager:
                                     return func(**params, **kwargs)
                                 return wrapper
                             wrapped_func = create_wrapper(tool_func, wrapper_params)
-                        
+
                         self.tools[tool_name] = wrapped_func
                         declaration = {
                             "name": tool_name,
@@ -88,6 +88,36 @@ class AIToolManager:
                         }
                         self.function_declarations.append(declaration)
                         print(f"[INFO] Loaded AITool: {tool_name} from {module_name}")
+
+                    # Handle ShellCommandTool class
+                    elif inspect.isclass(obj) and obj.__name__ == 'ShellCommandTool':
+                        if not self.chroot_dir:
+                            print(f"[CRITICAL_ERROR] Chroot directory not configured, cannot load {obj.__name__}. Skipping.")
+                            continue
+
+                        try:
+                            # Instantiate the tool
+                            shell_tool_instance = obj(chroot_dir=str(self.chroot_dir))
+
+                            # Get its function definitions
+                            definitions = shell_tool_instance.get_definition()
+
+                            # Register each function as a separate tool
+                            for declaration in definitions.get('function_declarations', []):
+                                tool_name = declaration.get('name')
+                                if not tool_name:
+                                    print(f"[WARNING] Found a declaration without a name in {obj.__name__}. Skipping.")
+                                    continue
+
+                                # Check if the instance has the method
+                                if hasattr(shell_tool_instance, tool_name):
+                                    self.tools[tool_name] = getattr(shell_tool_instance, tool_name)
+                                    self.function_declarations.append(declaration)
+                                    print(f"[INFO] Loaded ShellCommandTool method: {tool_name}")
+                                else:
+                                    print(f"[WARNING] {obj.__name__} definition '{tool_name}' found, but no corresponding method exists on the instance.")
+                        except Exception as e:
+                            print(f"[ERROR] Failed to load {obj.__name__}: {e}\n{traceback.format_exc()}")
 
                     # Handle legacy class-based tools
                     elif inspect.isclass(obj) and obj.__module__ == module_name and hasattr(obj, 'get_definition') and hasattr(obj, 'execute'):
@@ -111,7 +141,7 @@ class AIToolManager:
                             else:
                                 print(f"[WARNING] Tool {name} requires a Brave API key, but it's not configured. Skipping.")
                                 continue
-                        
+
                         tool_instance = obj(**tool_instance_args)
                         definition = tool_instance.get_definition()
                         if definition:
@@ -139,7 +169,7 @@ class AIToolManager:
             return
 
         enabled_servers = {name: config for name, config in self.mcp_server_configs.items() if not config.get('disabled')}
-        
+
         if not enabled_servers:
             print("[INFO] No enabled MCP servers found in configuration.")
             return
@@ -200,12 +230,12 @@ class AIToolManager:
 
                         if tool_name in self.tools:
                             print(f"[WARNING] Tool name collision: A tool named '{tool_name}' is already loaded. The one from MCP server '{server_name}' will overwrite it.")
-                        
+
                         self.tools[tool_name] = RemoteToolExecutor(client, tool_name, supports_streaming)
                         print(f"[INFO] Loaded remote tool: {tool_name} from MCP server '{server_name}'")
             except Exception as e:
                 print(f"[ERROR] Failed to load tools from MCP client '{server_name}': {e}")
-        
+
         self.remote_tools_loaded = True
 
     def _sanitize_schema(self, schema: Dict[str, Any]):

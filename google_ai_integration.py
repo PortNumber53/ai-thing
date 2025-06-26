@@ -1,3 +1,4 @@
+import asyncio
 import os
 import json
 import configparser
@@ -70,7 +71,7 @@ class GoogleAIIntegration:
         tool_summary = self.gemini_handler._get_tool_list_summary()
         print(tool_summary)
 
-    def chat(self, prompt: str, max_tool_calls: int = 10) -> str:
+    async def chat(self, prompt: str, max_tool_calls: int = 10) -> str:
         """
         Process a user's message and return the model's response.
 
@@ -82,9 +83,9 @@ class GoogleAIIntegration:
             The model's final response.
         """
         self._initialize_chat_components()
-        return self.gemini_handler.chat(prompt, max_tool_calls=max_tool_calls)
+        return await self.gemini_handler.chat(prompt, max_tool_calls=max_tool_calls)
 
-def main():
+async def main():
     """Main function to run the AI chat or CLI commands."""
     parser = argparse.ArgumentParser(
         description="A command-line interface for the Google AI integration.",
@@ -140,7 +141,7 @@ Examples:
             pass
         elif args.args:
             query_text = " ".join(args.args)
-            response = ai.chat(query_text)
+            response = await ai.chat(query_text)
         if not args.args or (args.args and args.args[0] == 'chat'):
             print("\n==================================================")
             print("Entering interactive chat mode. Press Ctrl+C to exit.")
@@ -150,7 +151,7 @@ Examples:
                     query = input("[User] ")
                     if query.lower() in ['exit', 'quit']:
                         break
-                    response = ai.chat(query)
+                    response = await ai.chat(query)
             except (KeyboardInterrupt, EOFError):
                 print("\nExiting chat.")
 
@@ -163,4 +164,4 @@ Examples:
         sys.exit(1)
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

@@ -1,3 +1,5 @@
+import asyncio
+import inspect
 import json
 import re
 import traceback
@@ -184,7 +186,7 @@ class GeminiChatHandler:
             summary_lines.append("  (No MCP server tools configured or loaded)")
         return "\n".join(summary_lines)
 
-    def chat(self, prompt: str, max_tool_calls: int = 5) -> str:
+    async def chat(self, prompt: str, max_tool_calls: int = 5) -> str:
         if not prompt or not prompt.strip():
             print("[AI] Please enter a message to continue.")
             return
@@ -252,7 +254,12 @@ class GeminiChatHandler:
                     # Handle new AITool functions which are directly callable
                     elif tool_instance and callable(tool_instance):
                         try:
-                            tool_output = tool_instance(**tool_args)
+                            # Check if the tool function is async
+                            if inspect.iscoroutinefunction(tool_instance):
+                                tool_output = await tool_instance(**tool_args)
+                            else:
+                                tool_output = tool_instance(**tool_args)
+
                             if not isinstance(tool_output, dict):
                                 print(f"[WARN] Tool {tool_name} did not return a dict. Wrapping: {tool_output}")
                                 tool_response_content_dict = {"result": str(tool_output)}
