@@ -113,37 +113,86 @@ class GeminiChatHandler:
         return system_instruction
 
     def _extract_args_from_proto(self, args_proto: Any) -> Dict[str, Any]:
-        extracted_args: Dict[str, Any] = {}
+        """Extract arguments from the function call proto."""
+        # Handle MapComposite objects (common in newer Protobuf versions)
+        if hasattr(args_proto, 'items') and callable(args_proto.items):
+            try:
+                return {k: self._extract_value_from_proto(v) for k, v in args_proto.items()}
+            except Exception as e:
+                self._log("ERROR", f"Error extracting from MapComposite: {e}")
+        
+        # Handle standard proto format
+        if hasattr(args_proto, 'fields'):
+            args_dict = {}
+            for key, value in args_proto.fields.items():
+                args_dict[key] = self._extract_value_from_proto(value)
+            return args_dict
+        
+        # Try to convert to a dictionary if it's a JSON string
+        if isinstance(args_proto, str):
+            try:
+                return json.loads(args_proto)
+            except json.JSONDecodeError:
+                pass
+        
+        # Last resort - try to convert the object to a string and parse it
         try:
-            if hasattr(args_proto, 'items') and callable(args_proto.items):
-                for key, value in args_proto.items():
-                    extracted_args[key] = value
-            elif hasattr(args_proto, 'fields'): # Fallback for older proto versions or different structures
-                for key, value_proto in args_proto.fields.items(): # type: ignore
-                    extracted_args[key] = self._extract_value_from_proto(value_proto)
-            else:
-                print(f"[DEBUG_WARN] args_proto is not a recognized type for extraction: {type(args_proto)}")
-        except Exception as e:
-            print(f"[ERROR] Error extracting arguments: {e}")
-            traceback.print_exc()
-        return extracted_args
+            args_str = str(args_proto)
+            if '{' in args_str and '}' in args_str:
+                # Try to extract a JSON-like structure
+                json_part = args_str[args_str.find('{'):args_str.rfind('}')+1]
+                return json.loads(json_part)
+        except Exception:
+            pass
+            
+        self._log("ERROR", f"Failed to parse function arguments: {args_proto} of type {type(args_proto)}")
+        return {}
+                
+    def _extract_text_from_response(self, response: Any) -> str:
+        """Extract text content from a model response."""
+        if not response or not response.candidates or not response.candidates[0].content:
+            return "I couldn't generate a response. Please try again."
+            
+        text_parts = []
+        for part in response.candidates[0].content.parts:
+            if hasattr(part, 'text') and part.text:
+                text_parts.append(part.text)
+                
+        return '\n'.join(text_parts) if text_parts else "I couldn't generate a text response."
 
     def _extract_value_from_proto(self, value_proto: Any) -> Any:
+        """Extract a value from a protobuf value object."""
+        # Handle primitive types
         if hasattr(value_proto, 'string_value'): return value_proto.string_value
         if hasattr(value_proto, 'number_value'): return value_proto.number_value
         if hasattr(value_proto, 'bool_value'): return value_proto.bool_value
-        if hasattr(value_proto, 'struct_value'): return self._extract_args_from_proto(value_proto.struct_value)
-        if hasattr(value_proto, 'list_value'): return [self._extract_value_from_proto(item) for item in value_proto.list_value.values]
-        # Direct value check for MapComposite items which are already Python native
+        if hasattr(value_proto, 'null_value'): return None
+        
+        # Handle list types
+        if hasattr(value_proto, 'list_value'):
+            if hasattr(value_proto.list_value, 'values'):
+                return [self._extract_value_from_proto(v) for v in value_proto.list_value.values]
+            return []
+            
+        # Handle struct/map types
+        if hasattr(value_proto, 'struct_value'):
+            if hasattr(value_proto.struct_value, 'fields'):
+                return {k: self._extract_value_from_proto(v) for k, v in value_proto.struct_value.fields.items()}
+            return {}
+            
+        # Handle MapComposite objects
+        if hasattr(value_proto, 'items') and callable(value_proto.items):
+            try:
+                return {k: self._extract_value_from_proto(v) for k, v in value_proto.items()}
+            except Exception:
+                pass
+                
+        # Handle direct values
         if isinstance(value_proto, (str, int, float, bool, list, dict)):
             return value_proto
-        if hasattr(value_proto, 'ListFields'): # General protobuf message fallback
-            for field_descriptor, value in value_proto.ListFields():
-                field_name = field_descriptor.name
-                if field_name in ['string_value', 'number_value', 'bool_value']: return value
-                if field_name == 'struct_value': return self._extract_args_from_proto(value)
-                if field_name == 'list_value': return [self._extract_value_from_proto(item) for item in value.values]
-        return None
+            
+        # Last resort - convert to string
+        return str(value_proto)
 
     def _send_function_error(self, function_name: str, error_msg: str) -> Any:
         print(f"[ERROR] Sending function error: {function_name} - {error_msg}")
@@ -219,6 +268,9 @@ class GeminiChatHandler:
 
         current_message_content: Union[str, List[Part]] = prompt
         tool_call_count = 0
+        # Track previous tool calls to detect repetition
+        previous_tool_calls = []
+        repeated_call_count = {}
 
         try:
             while tool_call_count < max_tool_calls:
@@ -240,7 +292,26 @@ class GeminiChatHandler:
                     tool_name = function_call_to_process.name
                     tool_args = self._extract_args_from_proto(function_call_to_process.args)
                     self._log("AI", f"Tool requested: {tool_name} with args: {tool_args}")
-
+                    
+                    # Check for repeated tool calls
+                    tool_call_key = f"{tool_name}:{json.dumps(tool_args, sort_keys=True)}"
+                    if tool_call_key in previous_tool_calls:
+                        # Increment the count for this specific tool call
+                        repeated_call_count[tool_call_key] = repeated_call_count.get(tool_call_key, 1) + 1
+                        
+                        # If the same tool with the same args has been called 3+ times, break the loop
+                        if repeated_call_count[tool_call_key] >= 3:
+                            self._log("WARN", f"Detected repeated tool call: {tool_name} with same args. Breaking loop.")
+                            # Send a special message to help the model understand the task is complete
+                            final_response = self.chat_session.send_message(
+                                f"The tool {tool_name} has been called multiple times with the same arguments and has completed successfully. Please provide a final response to the user without calling any more tools.",
+                                generation_config=genai.types.GenerationConfig(temperature=0.2)
+                            )
+                            return self._extract_text_from_response(final_response)
+                    
+                    # Add this tool call to the history
+                    previous_tool_calls.append(tool_call_key)
+                    
                     tool_instance = self.tool_manager.get_tool_instance(tool_name)
 
                     # Handle legacy class-based tools with an .execute() method

@@ -1,4 +1,5 @@
 import json
+from google.protobuf.json_format import MessageToDict
 import requests
 import uuid
 import select
@@ -109,12 +110,12 @@ class MCPClient:
             # If a direct URL is provided, derive base URL from it.
             parsed_url = urlparse(self.url)
             return f"{parsed_url.scheme}://{parsed_url.netloc}"
-        
+
         if 'args' in self.config and len(self.config['args']) > 1:
             sse_url = self.config['args'][1]
             if sse_url.endswith('/sse'):
                 return sse_url[:-4]
-        
+
         print(f"[ERROR] Could not determine base URL for '{self.server_name}' from config: {self.config}", flush=True)
         return None
 
@@ -143,7 +144,7 @@ class MCPClient:
         # PKCE setup
         code_verifier = base64.urlsafe_b64encode(os.urandom(32)).rstrip(b'=').decode('utf-8')
         code_challenge = base64.urlsafe_b64encode(hashlib.sha256(code_verifier.encode('utf-8')).digest()).rstrip(b'=').decode('utf-8')
-        
+
         redirect_uri = 'http://127.0.0.1:8080/'
         state = str(uuid.uuid4())
 
@@ -160,7 +161,7 @@ class MCPClient:
 
         server_address = ('127.0.0.1', 8080)
         handler_class = self._create_oauth_handler()
-        
+
         try:
             httpd = HTTPServer(server_address, handler_class)
         except OSError as e:
@@ -195,7 +196,7 @@ class MCPClient:
         token_headers = {
             'Accept': 'application/json'
         }
-        
+
         try:
             response = requests.post(token_url, data=token_payload, headers=token_headers, timeout=20)
 
@@ -209,7 +210,7 @@ class MCPClient:
                 response.raise_for_status()
 
             token_data = response.json()
-            
+
             if 'access_token' in token_data:
                 self.access_token = token_data['access_token']
                 self.config_manager.set_mcp_access_token(self.server_name, self.access_token)
@@ -231,7 +232,7 @@ class MCPClient:
             def do_GET(self):
                 parsed_path = urlparse(self.path)
                 query_params = parse_qs(parsed_path.query)
-                
+
                 mcp_client_instance.auth_code = query_params.get('code', [None])[0]
                 mcp_client_instance.received_state = query_params.get('state', [None])[0]
 
@@ -240,7 +241,7 @@ class MCPClient:
                 self.end_headers()
                 self.wfile.write(b"<h1>Authorization successful!</h1><p>You can close this window now.</p>")
                 print("[INFO] Received authorization code successfully.", flush=True)
-            
+
             def log_message(self, format, *args):
                 # Suppress logging of successful requests to keep the console clean
                 pass
@@ -287,13 +288,13 @@ class MCPClient:
         """Logs stderr from the proxy process."""
         if not self.process or not self.process.stderr:
             return
-        
+
         suppressing_timeout_error = False
         try:
             for line in iter(self.process.stderr.readline, ''):
                 if not line:
                     continue
-                
+
                 line_stripped = line.strip()
 
                 if "Body Timeout Error" in line_stripped and not suppressing_timeout_error:
@@ -306,7 +307,7 @@ class MCPClient:
                     if line_stripped == '}':
                         suppressing_timeout_error = False
                     continue # Suppress the line
-                
+
                 print(f"[{self.server_name}-proxy-stderr] {line_stripped}", file=sys.stderr)
         except ValueError:
             # This can happen if the process is killed and stderr is closed
@@ -321,6 +322,25 @@ class MCPClient:
             self.process.wait(timeout=5)
             print(f"[INFO] MCP server '{self.server_name}' shut down successfully.")
 
+    def _sanitize_payload(self, payload: Any) -> Any:
+        """Recursively sanitize payload to make it JSON serializable."""
+        if isinstance(payload, dict):
+            return {k: self._sanitize_payload(v) for k, v in payload.items()}
+        elif isinstance(payload, list):
+            return [self._sanitize_payload(item) for item in payload]
+        elif hasattr(payload, 'DESCRIPTOR'):  # Protobuf message
+            try:
+                return MessageToDict(payload)
+            except Exception:
+                return str(payload)
+        elif hasattr(payload, '_values'):  # RepeatedComposite
+            return [self._sanitize_payload(item) for item in payload]
+        elif isinstance(payload, (str, int, float, bool, type(None))):
+            return payload
+        else:
+            # Convert anything else to string
+            return str(payload)
+
     def _make_request(self, payload: Dict[str, Any], timeout: int = 60) -> Dict[str, Any]:
         """Routes the request to the appropriate handler based on configuration."""
         if self.command:
@@ -328,33 +348,74 @@ class MCPClient:
         else:
             return self._http_request(payload, timeout)
 
-    def _stdio_request(self, payload: Dict[str, Any], timeout: int) -> Dict[str, Any]:
-        """Sends a request and reads a line of response from a text stream."""
-        request_str = json.dumps(payload)
-        
+    class ProtoJSONEncoder(json.JSONEncoder):
+        """Custom JSON encoder that can handle Protobuf objects."""
+        def default(self, obj):
+            # Handle Protobuf objects
+            if hasattr(obj, 'DESCRIPTOR'):
+                return MessageToDict(obj)
+            # Handle RepeatedComposite objects
+            if hasattr(obj, '_values'):
+                return list(obj)
+            # Let the base class handle anything else
+            try:
+                return json.JSONEncoder.default(self, obj)
+            except TypeError:
+                # Last resort: convert to string
+                return str(obj)
+
+    def _stdio_request(self, payload: Dict[str, Any], timeout: int = 60) -> Dict[str, Any]:
+        """Makes a JSON-RPC request to a local MCP proxy via stdio."""
+        if not self.process:
+            return {"error": {"message": "MCP proxy process is not running."}}
+
+        try:
+            # Use the custom encoder to handle Protobuf objects
+            request_str = json.dumps(payload, cls=self.ProtoJSONEncoder)
+        except Exception as e:
+            print(f"[ERROR] Failed to serialize request payload: {e}")
+            # Fallback: try to convert problematic values to strings
+            sanitized_payload = self._sanitize_payload(payload)
+            try:
+                request_str = json.dumps(sanitized_payload)
+            except Exception as e2:
+                print(f"[ERROR] Failed to serialize sanitized payload: {e2}")
+                return {"error": {"message": f"Failed to serialize request payload: {e2}"}}
+
         with self._lock:
             if not self.process or not self.process.stdin or not self.process.stdout:
-                raise IOError("MCP proxy stdin or stdout is not available.")
-            
-            # Send request as a newline-terminated JSON string
-            self.process.stdin.write(f"{request_str}\n")
-            self.process.stdin.flush()
-
-            # Wait for the stdout to have data to read
-            ready, _, _ = select.select([self.process.stdout], [], [], timeout)
-            if not ready:
-                raise TimeoutError("Timeout waiting for response from MCP proxy.")
-
-            # Read one line of response
-            response_line = self.process.stdout.readline()
-            if not response_line:
-                raise IOError("MCP proxy connection closed unexpectedly or sent empty response.")
+                return {"error": {"message": "MCP proxy stdin or stdout is not available."}}
 
             try:
-                # The stream is in text mode, so we get a string directly
-                return json.loads(response_line)
-            except json.JSONDecodeError as e:
-                raise IOError(f"Failed to decode JSON response from MCP proxy: {e}. Response: {response_line}")
+                # Send request as a newline-terminated JSON string
+                self.process.stdin.write(f"{request_str}\n")
+                self.process.stdin.flush()
+            except IOError as e:
+                print(f"[ERROR] Failed to write to MCP proxy stdin: {e}")
+                return {"error": {"message": f"Failed to write to MCP proxy stdin: {e}"}}
+
+            try:
+                # Wait for the stdout to have data to read
+                ready, _, _ = select.select([self.process.stdout], [], [], timeout)
+                if not ready:
+                    print(f"[ERROR] Timeout waiting for response from MCP proxy after {timeout} seconds")
+                    return {"error": {"message": f"Timeout waiting for response from MCP proxy after {timeout} seconds"}}
+
+                # Read one line of response
+                response_line = self.process.stdout.readline()
+                if not response_line:
+                    print("[ERROR] MCP proxy connection closed unexpectedly or sent empty response")
+                    return {"error": {"message": "MCP proxy connection closed unexpectedly or sent empty response"}}
+
+                try:
+                    # The stream is in text mode, so we get a string directly
+                    return json.loads(response_line)
+                except json.JSONDecodeError as e:
+                    print(f"[ERROR] Failed to decode JSON response from MCP proxy: {e}. Response: {response_line}")
+                    return {"error": {"message": f"Failed to decode JSON response: {e}"}}
+            except Exception as e:
+                print(f"[ERROR] Unexpected error in MCP proxy communication: {e}")
+                return {"error": {"message": f"Unexpected error in MCP proxy communication: {e}"}}
 
     def _http_request(self, payload: Dict[str, Any], timeout: int = 60) -> Dict[str, Any]:
         """Makes a JSON-RPC request to a remote MCP server via HTTP."""
@@ -389,7 +450,7 @@ class MCPClient:
             "method": "tools/list",
             "params": {}
         }
-        
+
         print(f"[INFO] Listing tools for '{self.server_name}'...")
         # Allow a longer timeout for the initial tool listing to give the user time to authenticate.
         response_data = self._make_request(payload, timeout=120)
@@ -413,7 +474,7 @@ class MCPClient:
         print(f"[INFO] Successfully retrieved {len(self.tools)} tool(s) from '{self.server_name}'.")
         return self.tools
 
-    def execute_tool(self, tool_name: str, parameters: Dict[str, Any], use_streaming: bool = False) -> Any:
+    async def execute_tool(self, tool_name: str, parameters: Dict[str, Any], use_streaming: bool = False) -> Any:
         """Executes a tool on the server, with optional streaming."""
         request_id = str(uuid.uuid4())
         payload = {
@@ -428,30 +489,142 @@ class MCPClient:
         }
 
         print(f"[INFO] Executing tool '{tool_name}' on '{self.server_name}' (Streaming: {use_streaming})")
-        
+
         if use_streaming:
-            return self._make_streaming_request(payload)
+            # For streaming, we need to handle it as a coroutine
+            # Since the _make_streaming_request method returns a string, we need to wrap it
+            # in a coroutine to make it awaitable and format it properly
+            result = self._make_streaming_request(payload)
+
+            # Create a simple async function that returns the result as a properly formatted dict
+            async def async_result():
+                # If the result is already a dict with an error key, return it as is
+                if isinstance(result, dict) and 'error' in result:
+                    return result
+
+                # Otherwise, format the string result as a dict with a 'result' key
+                if isinstance(result, str):
+                    return self._parse_tool_response(result)
+
+                # If it's something else, convert it to a string and wrap it
+                return self._parse_tool_response(str(result))
+
+            return await async_result()
         else:
+            # For non-streaming, we can use the synchronous method
             response_data = self._make_request(payload)
             if not response_data or 'error' in response_data:
                 error_details = response_data.get('error', {})
                 return {"error": f"MCP tool execution error: {error_details.get('message', 'Unknown error')}"}
-            
+
             result = response_data.get('result', {})
             if result.get('isError'):
                 return {"error": f"Tool '{tool_name}' on server '{self.server_name}' reported an execution error."}
-            
-            content_parts = [item.get('text', '') for item in result.get('content', []) if item.get('type') == 'text']
-            return "\n".join(content_parts) if content_parts else result
 
-    def _make_streaming_request(self, payload: Dict[str, Any]) -> Any:
+            content_parts = [item.get('text', '') for item in result.get('content', []) if item.get('type') == 'text']
+            if content_parts:
+                return self._parse_tool_response("\n".join(content_parts))
+            else:
+                # Ensure we always return a dict
+                if isinstance(result, dict):
+                    return result
+                else:
+                    return self._parse_tool_response(str(result))
+
+    def _parse_tool_response(self, response: str) -> Dict[str, Any]:
+        """Parses the tool response to extract structured data if present.
+
+        Handles multiple formats:
+        1. MACHINE_PARSEABLE_DATA: marker followed by JSON
+        2. JSON-like strings that can be parsed directly
+        3. Plain text responses
+        """
+        if not response or not isinstance(response, str):
+            return {"result": str(response) if response is not None else ""}
+
+        # Format 1: Check if the response contains MACHINE_PARSEABLE_DATA marker
+        if 'MACHINE_PARSEABLE_DATA:' in response:
+            try:
+                # Extract the JSON part after MACHINE_PARSEABLE_DATA:
+                parts = response.split('MACHINE_PARSEABLE_DATA:', 1)
+                human_readable = parts[0].strip()
+                machine_data_part = parts[1].strip()
+
+                # Parse the JSON data
+                machine_data = json.loads(machine_data_part)
+
+                # Return both the original message and the parsed data
+                return {
+                    "result": human_readable,
+                    "parsed_data": machine_data,
+                    "success": machine_data.get('success', True)
+                }
+            except (json.JSONDecodeError, IndexError) as e:
+                print(f"[WARNING] Failed to parse machine data from response: {e}")
+                # Fall through to next format attempt
+
+        # Format 2: Check if the entire response is valid JSON
+        if response.strip().startswith('{') and response.strip().endswith('}'):
+            try:
+                json_data = json.loads(response)
+                if isinstance(json_data, dict):
+                    # If it's already a dict with a 'result' key, return it as is
+                    if 'result' in json_data:
+                        return json_data
+                    # Otherwise, wrap it in a result dict
+                    return {
+                        "result": json_data.get('message', str(json_data)),
+                        "parsed_data": json_data,
+                        "success": not json_data.get('error', False)
+                    }
+            except json.JSONDecodeError:
+                # Not valid JSON, fall through to default case
+                pass
+
+        # Format 3: Default case - just return the response as is
+        return {"result": response}
+
+    def list_tools(self, timeout: int = 15) -> List[Dict[str, Any]]:
+        """Retrieves the list of tools from the MCP server."""
+        request_id = str(uuid.uuid4())
+        payload = {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": "tools/list",
+            "params": {}
+        }
+
+        print(f"[INFO] Listing tools for '{self.server_name}'...")
+        # Allow a longer timeout for the initial tool listing to give the user time to authenticate.
+        response_data = self._make_request(payload, timeout=120)
+
+        if not response_data or 'error' in response_data:
+            error = response_data.get('error', {})
+            error_msg = error.get('message', 'Unknown error')
+
+            if "timed out" in error_msg:
+                print(f"[INFO] Listing tools from '{self.server_name}' timed out. This is likely waiting for you to authenticate.")
+                print(f"[INFO] Please complete the login flow in your browser, then try your request again.")
+            else:
+                print(f"[ERROR] MCP error from '{self.server_name}' while listing tools: {error_msg}")
+            return []
+
+        if response_data.get('id') != request_id:
+            print(f"[ERROR] MCP response ID mismatch for '{self.server_name}'.")
+            return []
+
+        self.tools = response_data.get('result', {}).get('tools', [])
+        print(f"[INFO] Successfully retrieved {len(self.tools)} tool(s) from '{self.server_name}'.")
+        return self.tools
+
+    async def _make_streaming_request(self, payload: Dict[str, Any]) -> Any:
         """Routes the streaming request to the appropriate handler."""
         if self.command:
-            return self._stdio_streaming_request(payload)
+            return await self._stdio_streaming_request(payload)
         else:
-            return self._http_streaming_request(payload)
+            return await self._http_streaming_request(payload)
 
-    def _stdio_streaming_request(self, payload: Dict[str, Any]) -> Any:
+    async def _stdio_streaming_request(self, payload: Dict[str, Any]) -> Any:
         """Handles a streaming request over stdio, processing JSON-RPC notifications."""
         if not self.process or not self.process.stdin or not self.process.stdout:
             return {"error": {"message": "Subprocess not running for stdio streaming."}}
@@ -469,7 +642,7 @@ class MCPClient:
                     if not response_str:
                         print(f"\n[WARNING] Stdio stream ended unexpectedly.")
                         break
-                    
+
                     try:
                         event = json.loads(response_str)
                         if 'error' in event and event.get('id') == payload['id']:
@@ -483,7 +656,7 @@ class MCPClient:
                             if text_parts:
                                 print(''.join(text_parts), end='', flush=True)
                                 full_response_content.extend(text_parts)
-                        
+
                         elif event.get('method') == 'tool.stream.final':
                             params = event.get('params', {})
                             content = params.get('content', [])
@@ -502,7 +675,7 @@ class MCPClient:
 
         return "\n".join(full_response_content)
 
-    def _http_streaming_request(self, payload: Dict[str, Any]) -> Any:
+    async def _http_streaming_request(self, payload: Dict[str, Any]) -> Any:
         """Makes a streaming HTTP request and processes Server-Sent Events (SSE)."""
         headers = {
             'Content-Type': 'application/json',
@@ -510,35 +683,69 @@ class MCPClient:
         }
         full_response_content = []
         try:
-            with requests.post(self.url, json=payload, headers=headers, stream=True, timeout=300) as response:
-                response.raise_for_status()
-                print(f"--- Streaming output for tool call {payload['id']} ---")
-                for line in response.iter_lines(decode_unicode=True):
-                    if line.startswith('data:'):
-                        try:
-                            data_str = line[len('data:'):].strip()
-                            if data_str == '[DONE]':
-                                break
-                            event_data = json.loads(data_str)
-                            
-                            if event_data.get('type') == 'tool.stream.partial':
-                                partial_result = event_data.get('result', {})
-                                content_parts = [item.get('text', '') for item in partial_result.get('content', []) if item.get('type') == 'text']
-                                print(''.join(content_parts), end='', flush=True)
-                                full_response_content.extend(content_parts)
+            async with aiohttp.ClientSession() as session:
+                async with session.post(self.url, json=payload, headers=headers, timeout=300) as response:
+                    response.raise_for_status()
+                    print(f"--- Streaming output for tool call {payload['id']} ---")
+                    async for line in response.content:
+                        if line.startswith(b'data:'):
+                            try:
+                                data_str = line[len(b'data:'):].strip().decode('utf-8')
+                                if data_str == '[DONE]':
+                                    break
+                                event_data = json.loads(data_str)
 
-                            elif event_data.get('type') == 'tool.stream.final':
-                                final_result = event_data.get('result', {})
-                                if final_result:
-                                    full_response_content = [item.get('text', '') for item in final_result.get('content', []) if item.get('type') == 'text']
-                                break
-                        
-                        except json.JSONDecodeError:
-                            print(f"\n[WARNING] Could not decode JSON from HTTP stream: {line}")
-                print(f"\n--- End of streaming output ---")
+                                if event_data.get('type') == 'tool.stream.partial':
+                                    partial_result = event_data.get('result', {})
+                                    content_parts = [item.get('text', '') for item in partial_result.get('content', []) if item.get('type') == 'text']
+                                    print(''.join(content_parts), end='', flush=True)
+                                    full_response_content.extend(content_parts)
 
-        except requests.exceptions.RequestException as e:
+                                elif event_data.get('type') == 'tool.stream.final':
+                                    final_result = event_data.get('result', {})
+                                    if final_result:
+                                        full_response_content = [item.get('text', '') for item in final_result.get('content', []) if item.get('type') == 'text']
+                                    break
+
+                            except json.JSONDecodeError:
+                                print(f"\n[WARNING] Could not decode JSON from HTTP stream: {line}")
+                    print(f"\n--- End of streaming output ---")
+
+        except aiohttp.ClientError as e:
             print(f"\n[ERROR] HTTP streaming request failed: {e}")
             return {"error": f"HTTP streaming request failed: {e}"}
 
         return "\n".join(full_response_content)
+
+    def list_tools(self, timeout: int = 15) -> List[Dict[str, Any]]:
+        """Retrieves the list of tools from the MCP server."""
+        request_id = str(uuid.uuid4())
+        payload = {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": "tools/list",
+            "params": {}
+        }
+
+        print(f"[INFO] Listing tools for '{self.server_name}'...")
+        # Allow a longer timeout for the initial tool listing to give the user time to authenticate.
+        response_data = self._make_request(payload, timeout=120)
+
+        if not response_data or 'error' in response_data:
+            error = response_data.get('error', {})
+            error_msg = error.get('message', 'Unknown error')
+
+            if "timed out" in error_msg:
+                print(f"[INFO] Listing tools from '{self.server_name}' timed out. This is likely waiting for you to authenticate.")
+                print(f"[INFO] Please complete the login flow in your browser, then try your request again.")
+            else:
+                print(f"[ERROR] MCP error from '{self.server_name}' while listing tools: {error_msg}")
+            return []
+
+        if response_data.get('id') != request_id:
+            print(f"[ERROR] MCP response ID mismatch for '{self.server_name}'.")
+            return []
+
+        self.tools = response_data.get('result', {}).get('tools', [])
+        print(f"[INFO] Successfully retrieved {len(self.tools)} tool(s) from '{self.server_name}'.")
+        return self.tools

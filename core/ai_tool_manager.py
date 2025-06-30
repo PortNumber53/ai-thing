@@ -241,9 +241,10 @@ class AIToolManager:
     def _sanitize_schema(self, schema: Dict[str, Any]):
         """Recursively removes unsupported fields from the schema for Gemini API compatibility."""
         # Fields to remove at any level
-        unsupported_keys = ['minimum', 'maximum', 'example', 'additionalProperties', '$schema', 'default', 'format', 'nullable']
+        unsupported_keys = ['minimum', 'maximum', 'example', 'additionalProperties', '$schema', 'default', 'format', 'nullable', 'anyOf', 'oneOf', 'allOf']
         for key in unsupported_keys:
             if key in schema:
+                print(f"[INFO] Removing unsupported schema field: {key}")
                 del schema[key]
 
         # Sanitize description fields by removing backticks, which can confuse the model.
@@ -259,6 +260,11 @@ class AIToolManager:
         # Recurse into array items
         if 'items' in schema and isinstance(schema['items'], dict):
             self._sanitize_schema(schema['items'])
+            
+        # Handle any other nested dictionaries that might contain schema fields
+        for key, value in list(schema.items()):
+            if isinstance(value, dict):
+                self._sanitize_schema(value)
 
     def get_tool_instance(self, tool_name: str) -> Optional[Any]:
         return self.tools.get(tool_name)
