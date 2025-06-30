@@ -246,7 +246,7 @@ class GeminiChatHandler:
                     # Handle legacy class-based tools with an .execute() method
                     if tool_instance and hasattr(tool_instance, 'execute') and callable(getattr(tool_instance, 'execute')):
                         try:
-                            tool_output = tool_instance.execute(**tool_args)
+                            tool_output = await tool_instance.execute(**tool_args)
                             if not isinstance(tool_output, dict):
                                 self._log("WARN", f"Tool {tool_name} did not return a dict. Wrapping: {tool_output}")
                                 tool_response_content_dict = {"result": str(tool_output)}
