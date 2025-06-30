@@ -120,10 +120,7 @@ class ShellCommandTool:
         # Now, update the status based on the process state.
         if proc.returncode is not None:
             # Cancel the background reader tasks
-            job['stdout_task'].cancel()
-            job['stderr_task'].cancel()
-            # Wait for tasks to finish cancelling (optional, but good practice)
-            await asyncio.gather(job['stdout_task'], job['stderr_task'], return_exceptions=True)
+            await asyncio.gather(job['stdout_task'], job['stderr_task'])
             job['status'] = 'completed'
             job['exit_code'] = proc.returncode
         elif time.time() - job['start_time'] > job['timeout']:
