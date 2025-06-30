@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import shlex
 import time
 import uuid
 from pathlib import Path
@@ -68,8 +69,13 @@ class ShellCommandTool:
     async def start_shell_command(self, command: str, timeout: int = 60) -> Dict[str, Any]:
         job_id = str(uuid.uuid4())
         try:
-            proc = await asyncio.create_subprocess_shell(
-                command,
+            # SECURITY: Use shlex to split the command and avoid shell injection.
+            cmd_parts = shlex.split(command)
+            if not cmd_parts:
+                return {"status": "error", "error": "Empty command provided."}
+
+            proc = await asyncio.create_subprocess_exec(
+                *cmd_parts,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=self.chroot_dir

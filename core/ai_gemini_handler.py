@@ -292,7 +292,7 @@ class GeminiChatHandler:
                             finish_reason_str = str(response.candidates[0].finish_reason) if (response.candidates and response.candidates[0].finish_reason) else 'N/A'
                             response_text = f"(No textual response. Finish reason: {finish_reason_str})"
                     self._log("AI", response_text)
-                    self.chat_session.history.clear()
+
                     return response_text
 
             # Max tool calls reached
@@ -311,7 +311,7 @@ class GeminiChatHandler:
                             break
                 if response_text:
                     self._log("AI", response_text)
-                    self.chat_session.history.clear()
+
                     return response_text
                 elif function_call_in_final_response:
                     return f"(Task ended after reaching tool call limit. Model wanted to call: {function_call_in_final_response.name})"
