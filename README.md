@@ -5,11 +5,12 @@ A sophisticated, conversational AI agent powered by Google's Gemini model. This 
 ## Key Features
 
 - **Advanced Conversational AI**: Utilizes Google's Gemini models for natural and intelligent dialogue.
-- **Multi-Turn Tool Calling**: Can sequentially call multiple tools to solve complex problems that require several steps (e.g., read from a file, process data, write to another file).
+- **Multi-Turn Tool Calling**: Can sequentially call multiple tools to solve complex problems that require several steps.
 - **Dynamic & Extensible Toolset**:
-    - `WeatherTool`: Provides real-time weather data from the Open-Meteo API.
-    - `FileReadTool`: Reads the contents of files.
-    - `FileFullWriteTool`: Writes content to files, with options to override or preserve existing files.
+    - `coder_task`: A specialized sub-agent for resolving coding tasks.
+    - `ShellCommandTool`: Executes shell commands asynchronously within a chroot environment.
+    - `WebSearchTool`: Performs web searches using Brave Search.
+    - Integration with external Model Context Protocol (MCP) servers like Cloudflare for extended capabilities.
 - **Chroot Jail Security**: All file operations are strictly confined to a pre-configured "chroot" directory, preventing the AI from accessing or modifying any files outside its designated workspace. This provides a critical layer of security.
 - **Profile-Based Configuration**: Manages API keys and settings like the `chroot_dir` through a `secrets.ini` file with support for multiple profiles.
 - **Dynamic System Prompts**: The agent's core instructions are dynamically built from the capabilities of the loaded tools, making the system modular and easy to extend.
@@ -41,6 +42,7 @@ A sophisticated, conversational AI agent powered by Google's Gemini model. This 
     [profile:development]
     # Get an API key from Google AI Studio: https://makersuite.google.com/
     google_api_key = your_google_api_key_here
+    brave_api_key = your_brave_api_key_here
 
     # The secure directory where the AI can read and write files.
     # This path MUST exist.
@@ -60,29 +62,35 @@ The script will load the configured profile and start a chat session where you c
 
 ## Example Queries
 
-- **Simple Weather Query**:
-  `"What's the weather like in Tokyo today?"`
+- **Coding Task**:
+  `"Refactor the `main` function in `google_ai_integration.py` to handle asynchronous operations more robustly."`
 
-- **File I/O**:
-  `"Read the content of 'my_notes.txt' and summarize it for me."`
+- **Shell Command Execution**:
+  `"List all Python files in the `core/` directory."`
 
-- **Multi-Step Tool Use**:
-  `"What are the temperatures for the cities listed in 'locations.txt'? Write the results into a new file named 'weather_report.txt'."`
+- **Web Search**:
+  `"Search the web for 'latest advancements in large language models'."`
 
 - **Get Help for a Tool**:
-  `"/help write_file_full"`
+  `"/help coder_task"`
 
 ## Project Structure
 
--   `google_ai_integration.py`: The main application logic, handling AI chat, tool loading, and multi-turn execution.
+-   `google_ai_integration.py`: Main entry point for the AI agent, handling CLI, chat, and orchestration of configuration, tools, and model interaction.
 -   `requirements.txt`: Python package dependencies.
+-   `core/`: Contains core functionalities of the agent.
+    -   `ai_config_manager.py`: Manages application configuration, API keys, and MCP server settings.
+    -   `ai_gemini_handler.py`: Encapsulates Gemini model and chat session logic, including tool call orchestration.
+    -   `ai_tool_manager.py`: Dynamically loads local and remote tools, managing their registration and execution.
+    -   `mcp_client.py`: Handles OAuth authentication and JSON-RPC communication with MCP servers.
+    -   `ai_type_definitions.py`: Defines standard data structures for function calls, tools, and chat messages.
 -   `tools/`: A directory for all agent-usable tools.
-    -   `weather_tool.py`: Fetches weather data.
-    -   `file_read_tool.py`: Handles reading files within the chroot jail.
-    -   `file_full_write_tool.py`: Handles writing files within the chroot jail.
+    -   `coder_tool.py`: Implements the `coder_task` for resolving coding tasks.
+    -   `shell_command_tool.py`: Provides `ShellCommandTool` for asynchronous command execution.
+    -   `web_search_tool.py`: Implements the `WebSearchTool` for performing web searches.
 -   `~/.config/ai-thing/secrets.ini`: Local configuration for API keys and settings (not in repository).
 
 ## Notes
 
--   The weather tool uses the Open-Meteo API and OpenStreetMap's Nominatim geocoding service.
--   The chroot jail for file tools is a mandatory security feature. The AI cannot operate outside the directory specified in your `secrets.ini`.
+-   The chroot jail environment is a mandatory security feature. The AI's file and shell operations are strictly confined to the directory specified in your `secrets.ini`.
+-   The agent's capabilities are highly modular and extensible through the `tools/` directory and integration with external MCP servers.
