@@ -1,4 +1,5 @@
 import asyncio
+import datetime
 import inspect
 import json
 import re
@@ -30,7 +31,6 @@ class GeminiChatHandler:
 
     def _log(self, level: str, message: str):
         """Prints a formatted log message with a timestamp."""
-        import datetime
         timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
         print(f"[{timestamp}] [{level.upper()}] {message}")
 
