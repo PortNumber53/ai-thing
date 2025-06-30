@@ -153,6 +153,9 @@ class ShellCommandTool:
 
         if proc.returncode is None:
             proc.kill()
+            job['stdout_task'].cancel()
+            job['stderr_task'].cancel()
+            await asyncio.gather(job['stdout_task'], job['stderr_task'], return_exceptions=True)
             job['status'] = 'killed'
             return {"status": "killed", "job_id": job_id}
         else:
