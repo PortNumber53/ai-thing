@@ -28,6 +28,12 @@ class GeminiChatHandler:
         self.model: Optional[genai.GenerativeModel] = None
         self._initialize_model_and_session()
 
+    def _log(self, level: str, message: str):
+        """Prints a formatted log message with a timestamp."""
+        import datetime
+        timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+        print(f"[{timestamp}] [{level.upper()}] {message}")
+
     def _initialize_model_and_session(self):
         """Initialize the Gemini model and chat session."""
         self._configure_genai()
@@ -43,7 +49,7 @@ class GeminiChatHandler:
             system_instruction=self._get_system_instruction()
         )
         self.chat_session = self.model.start_chat(history=[])
-        print(f"[INFO] Gemini model '{self.config_manager.model_name}' initialized and chat session started.")
+        self._log("INFO", f"Gemini model '{self.config_manager.model_name}' initialized and chat session started.")
 
     def _configure_genai(self):
         """Configures the Google AI API key."""
@@ -188,13 +194,13 @@ class GeminiChatHandler:
 
     async def chat(self, prompt: str, max_tool_calls: int = 5) -> str:
         if not prompt or not prompt.strip():
-            print("[AI] Please enter a message to continue.")
+            self._log("AI", "Please enter a message to continue.")
             return
 
         if not self.chat_session or not self.model:
             return "Error: Chat session or model not initialized."
 
-        print(f"\n[User entered] {prompt}")
+        self._log("USER", f"User entered: {prompt}")
 
         if prompt.strip().lower().startswith("/help"):
             parts = prompt.strip().split()
@@ -216,7 +222,7 @@ class GeminiChatHandler:
 
         try:
             while tool_call_count < max_tool_calls:
-                print(f"[DEBUG] Sending to model (Loop {tool_call_count + 1}): {current_message_content}")
+                self._log("DEBUG", f"Sending to model (Loop {tool_call_count + 1}): {current_message_content}")
                 response = self.chat_session.send_message(
                     current_message_content,
                     generation_config=genai.types.GenerationConfig(temperature=0.2) # Updated to new API
@@ -233,7 +239,7 @@ class GeminiChatHandler:
                     tool_call_count += 1
                     tool_name = function_call_to_process.name
                     tool_args = self._extract_args_from_proto(function_call_to_process.args)
-                    print(f"\n[AI] Tool requested: {tool_name} with args: {tool_args}")
+                    self._log("AI", f"Tool requested: {tool_name} with args: {tool_args}")
 
                     tool_instance = self.tool_manager.get_tool_instance(tool_name)
 
@@ -242,13 +248,13 @@ class GeminiChatHandler:
                         try:
                             tool_output = tool_instance.execute(**tool_args)
                             if not isinstance(tool_output, dict):
-                                print(f"[WARN] Tool {tool_name} did not return a dict. Wrapping: {tool_output}")
+                                self._log("WARN", f"Tool {tool_name} did not return a dict. Wrapping: {tool_output}")
                                 tool_response_content_dict = {"result": str(tool_output)}
                             else:
                                 tool_response_content_dict = tool_output
                         except Exception as e:
                             error_msg = f"Error executing tool {tool_name}: {str(e)}"
-                            print(f"\n[ERROR] {error_msg}")
+                            self._log("ERROR", error_msg)
                             traceback.print_exc()
                             tool_response_content_dict = {'error': error_msg}
                     # Handle new AITool functions which are directly callable
@@ -261,18 +267,18 @@ class GeminiChatHandler:
                                 tool_output = tool_instance(**tool_args)
 
                             if not isinstance(tool_output, dict):
-                                print(f"[WARN] Tool {tool_name} did not return a dict. Wrapping: {tool_output}")
+                                self._log("WARN", f"Tool {tool_name} did not return a dict. Wrapping: {tool_output}")
                                 tool_response_content_dict = {"result": str(tool_output)}
                             else:
                                 tool_response_content_dict = tool_output
                         except Exception as e:
                             error_msg = f"Error executing callable tool {tool_name}: {str(e)}"
-                            print(f"\n[ERROR] {error_msg}")
+                            self._log("ERROR", error_msg)
                             traceback.print_exc()
                             tool_response_content_dict = {'error': error_msg}
                     else:
                         error_msg = f"Unknown or non-executable tool: {tool_name}"
-                        print(f"\n[ERROR] {error_msg}")
+                        self._log("ERROR", error_msg)
                         tool_response_content_dict = {'error': error_msg}
 
                     current_message_content = [Part(function_response={'name': tool_name, 'response': tool_response_content_dict})]
@@ -285,12 +291,13 @@ class GeminiChatHandler:
                         else:
                             finish_reason_str = str(response.candidates[0].finish_reason) if (response.candidates and response.candidates[0].finish_reason) else 'N/A'
                             response_text = f"(No textual response. Finish reason: {finish_reason_str})"
-                    print(f"\n[AI] {response_text}")
+                    self._log("AI", response_text)
+                    self.chat_session.history.clear()
                     return response_text
 
             # Max tool calls reached
             if tool_call_count >= max_tool_calls:
-                print(f"[WARN] Maximum tool call limit ({max_tool_calls}) reached. Sending last tool response for a final summary.")
+                self._log("WARN", f"Maximum tool call limit ({max_tool_calls}) reached. Sending last tool response for a final summary.")
                 response = self.chat_session.send_message(
                     current_message_content, # This is the last tool's response
                     generation_config=genai.types.GenerationConfig(temperature=0.2)
@@ -303,7 +310,8 @@ class GeminiChatHandler:
                             function_call_in_final_response = part.function_call
                             break
                 if response_text:
-                    print(f"\n[AI] {response_text}")
+                    self._log("AI", response_text)
+                    self.chat_session.history.clear()
                     return response_text
                 elif function_call_in_final_response:
                     return f"(Task ended after reaching tool call limit. Model wanted to call: {function_call_in_final_response.name})"
@@ -312,7 +320,7 @@ class GeminiChatHandler:
 
         except Exception as e:
             error_msg = f"An error occurred in the chat method: {str(e)}"
-            print(f"\n[ERROR] {error_msg}")
-            print(f"\n[ERROR] Details: {traceback.format_exc()}")
+            self._log("ERROR", error_msg)
+            self._log("ERROR", f"Details: {traceback.format_exc()}")
             return f"I'm sorry, but I encountered a critical error: {str(e)}"
         return "(Should not be reached - error in chat logic)" # Should not happen

@@ -78,9 +78,9 @@ class ShellCommandTool:
                 'process': proc,
                 'start_time': time.time(),
                 'timeout': timeout,
-                'stdout': b'',
-                'stderr': b'',
-                'status': 'running'
+                'status': 'running',
+                'stdout': bytearray(),
+                'stderr': bytearray()
             }
             return {"status": "started", "job_id": job_id}
         except Exception as e:
@@ -93,19 +93,37 @@ class ShellCommandTool:
         job = self.active_jobs[job_id]
         proc = job['process']
 
-        # Non-blocking read of stdout and stderr
-        try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=0.1)
-            job['stdout'] += stdout
-            job['stderr'] += stderr
-        except asyncio.TimeoutError:
-            pass # No new output, which is fine
+        # If the process is still running, try to read partial output from streams.
+        if proc.returncode is None:
+            try:
+                # Read up to 4KB from stdout with a very small timeout to avoid blocking.
+                stdout_data = await asyncio.wait_for(proc.stdout.read(4096), timeout=0.01)
+                job['stdout'] += stdout_data
+            except asyncio.TimeoutError:
+                pass  # No new output, which is fine.
+            try:
+                # Read up to 4KB from stderr.
+                stderr_data = await asyncio.wait_for(proc.stderr.read(4096), timeout=0.01)
+                job['stderr'] += stderr_data
+            except asyncio.TimeoutError:
+                pass  # No new output, which is fine.
 
+        # Now, update the status based on the process state.
         if proc.returncode is not None:
+            # Process has finished. Do one final communicate() call to drain the streams.
+            if not job.get('final_read_done'):
+                stdout, stderr = await proc.communicate()
+                job['stdout'] += stdout
+                job['stderr'] += stderr
+                job['final_read_done'] = True
             job['status'] = 'completed'
             job['exit_code'] = proc.returncode
         elif time.time() - job['start_time'] > job['timeout']:
             proc.kill()
+            # After killing, get all remaining output.
+            stdout, stderr = await proc.communicate()
+            job['stdout'] += stdout
+            job['stderr'] += stderr
             job['status'] = 'timed_out'
             job['exit_code'] = -1 # Custom code for timeout
 
