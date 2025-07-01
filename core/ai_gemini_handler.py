@@ -64,14 +64,16 @@ class GeminiChatHandler:
     def _get_system_instruction(self) -> str:
         """Get the system instruction for the model, dynamically including tool information."""
         base_instruction = (
-            "You are a helpful AI assistant. "
-            "When a user asks for an action that can be performed by a tool, "
-            "you MUST respond with a tool call using the provided function declarations. "
-            "Do not add any explanatory text before or after the tool call itself. "
-            "If a query requires multiple steps or information from multiple tools, "
-            "you can make a sequence of tool calls. After each tool call, I will provide you with the result, "
-            "and you can then decide if another tool call is needed or if you can now answer the user's query. "
-            "If you are unsure or the action cannot be performed by a tool, respond naturally."
+            "You are an efficient task-focused AI assistant. Your primary goal is to accomplish the user's request as directly as possible."
+            "Focus on completing tasks rather than explaining what you're doing."
+            "When a user asks for an action that can be performed by a tool, immediately use the appropriate tool without unnecessary explanation."
+            "When using tools:"
+            "1. Call tools directly without explaining what you're about to do"
+            "2. Make tool calls in sequence when a task requires multiple steps"
+            "3. After receiving tool results, either make another tool call if needed or provide a concise answer"
+            "4. Prioritize showing results over explaining processes"
+            "5. Be direct and to the point in all responses"
+            "If you are unsure or the action cannot be performed by a tool, respond concisely with only the necessary information."
         )
 
         tool_descriptions = []
@@ -120,21 +122,21 @@ class GeminiChatHandler:
                 return {k: self._extract_value_from_proto(v) for k, v in args_proto.items()}
             except Exception as e:
                 self._log("ERROR", f"Error extracting from MapComposite: {e}")
-        
+
         # Handle standard proto format
         if hasattr(args_proto, 'fields'):
             args_dict = {}
             for key, value in args_proto.fields.items():
                 args_dict[key] = self._extract_value_from_proto(value)
             return args_dict
-        
+
         # Try to convert to a dictionary if it's a JSON string
         if isinstance(args_proto, str):
             try:
                 return json.loads(args_proto)
             except json.JSONDecodeError:
                 pass
-        
+
         # Last resort - try to convert the object to a string and parse it
         try:
             args_str = str(args_proto)
@@ -144,20 +146,20 @@ class GeminiChatHandler:
                 return json.loads(json_part)
         except Exception:
             pass
-            
+
         self._log("ERROR", f"Failed to parse function arguments: {args_proto} of type {type(args_proto)}")
         return {}
-                
+
     def _extract_text_from_response(self, response: Any) -> str:
         """Extract text content from a model response."""
         if not response or not response.candidates or not response.candidates[0].content:
             return "I couldn't generate a response. Please try again."
-            
+
         text_parts = []
         for part in response.candidates[0].content.parts:
             if hasattr(part, 'text') and part.text:
                 text_parts.append(part.text)
-                
+
         return '\n'.join(text_parts) if text_parts else "I couldn't generate a text response."
 
     def _extract_value_from_proto(self, value_proto: Any) -> Any:
@@ -167,30 +169,30 @@ class GeminiChatHandler:
         if hasattr(value_proto, 'number_value'): return value_proto.number_value
         if hasattr(value_proto, 'bool_value'): return value_proto.bool_value
         if hasattr(value_proto, 'null_value'): return None
-        
+
         # Handle list types
         if hasattr(value_proto, 'list_value'):
             if hasattr(value_proto.list_value, 'values'):
                 return [self._extract_value_from_proto(v) for v in value_proto.list_value.values]
             return []
-            
+
         # Handle struct/map types
         if hasattr(value_proto, 'struct_value'):
             if hasattr(value_proto.struct_value, 'fields'):
                 return {k: self._extract_value_from_proto(v) for k, v in value_proto.struct_value.fields.items()}
             return {}
-            
+
         # Handle MapComposite objects
         if hasattr(value_proto, 'items') and callable(value_proto.items):
             try:
                 return {k: self._extract_value_from_proto(v) for k, v in value_proto.items()}
             except Exception:
                 pass
-                
+
         # Handle direct values
         if isinstance(value_proto, (str, int, float, bool, list, dict)):
             return value_proto
-            
+
         # Last resort - convert to string
         return str(value_proto)
 
@@ -275,9 +277,15 @@ class GeminiChatHandler:
         try:
             while tool_call_count < max_tool_calls:
                 self._log("DEBUG", f"Sending to model (Loop {tool_call_count + 1}): {current_message_content}")
+                # Use a lower temperature and configure for more direct responses
                 response = self.chat_session.send_message(
                     current_message_content,
-                    generation_config=genai.types.GenerationConfig(temperature=0.2) # Updated to new API
+                    generation_config=genai.types.GenerationConfig(
+                        temperature=0.1,  # Lower temperature for more focused responses
+                        top_p=0.95,       # More deterministic outputs
+                        top_k=40,         # Focus on more relevant tokens
+                        max_output_tokens=800  # Limit response length to encourage conciseness
+                    )
                 )
 
                 function_call_to_process = None
@@ -292,26 +300,31 @@ class GeminiChatHandler:
                     tool_name = function_call_to_process.name
                     tool_args = self._extract_args_from_proto(function_call_to_process.args)
                     self._log("AI", f"Tool requested: {tool_name} with args: {tool_args}")
-                    
+
                     # Check for repeated tool calls
                     tool_call_key = f"{tool_name}:{json.dumps(tool_args, sort_keys=True)}"
                     if tool_call_key in previous_tool_calls:
                         # Increment the count for this specific tool call
                         repeated_call_count[tool_call_key] = repeated_call_count.get(tool_call_key, 1) + 1
-                        
+
                         # If the same tool with the same args has been called 3+ times, break the loop
                         if repeated_call_count[tool_call_key] >= 3:
                             self._log("WARN", f"Detected repeated tool call: {tool_name} with same args. Breaking loop.")
-                            # Send a special message to help the model understand the task is complete
+                            # Send a direct message to help the model understand the task is complete
                             final_response = self.chat_session.send_message(
-                                f"The tool {tool_name} has been called multiple times with the same arguments and has completed successfully. Please provide a final response to the user without calling any more tools.",
-                                generation_config=genai.types.GenerationConfig(temperature=0.2)
+                                f"Task completed. The tool {tool_name} has already been executed with these arguments. Provide only the final result without further tool calls or explanations.",
+                                generation_config=genai.types.GenerationConfig(
+                                    temperature=0.1,
+                                    top_p=0.95,
+                                    top_k=40,
+                                    max_output_tokens=400  # Even shorter for final response
+                                )
                             )
                             return self._extract_text_from_response(final_response)
-                    
+
                     # Add this tool call to the history
                     previous_tool_calls.append(tool_call_key)
-                    
+
                     tool_instance = self.tool_manager.get_tool_instance(tool_name)
 
                     # Handle legacy class-based tools with an .execute() method
@@ -370,8 +383,13 @@ class GeminiChatHandler:
             if tool_call_count >= max_tool_calls:
                 self._log("WARN", f"Maximum tool call limit ({max_tool_calls}) reached. Sending last tool response for a final summary.")
                 response = self.chat_session.send_message(
-                    current_message_content, # This is the last tool's response
-                    generation_config=genai.types.GenerationConfig(temperature=0.2)
+                    f"Task completion required. Provide only the final result based on the tool outputs so far. Be direct and concise.",
+                    generation_config=genai.types.GenerationConfig(
+                        temperature=0.1,
+                        top_p=0.95,
+                        top_k=40,
+                        max_output_tokens=600  # Limit response length
+                    )
                 )
                 response_text = "".join(p.text for p in response.candidates[0].content.parts if hasattr(p, 'text')).strip()
                 function_call_in_final_response = None

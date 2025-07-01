@@ -241,7 +241,7 @@ class AIToolManager:
     def _sanitize_schema(self, schema: Dict[str, Any]):
         """Recursively removes unsupported fields from the schema for Gemini API compatibility."""
         # Fields to remove at any level
-        unsupported_keys = ['minimum', 'maximum', 'example', 'additionalProperties', '$schema', 'default', 'format', 'nullable', 'anyOf', 'oneOf', 'allOf']
+        unsupported_keys = ['minimum', 'maximum', 'minLength', 'maxLength', 'example', 'additionalProperties', '$schema', 'default', 'format', 'nullable', 'anyOf', 'oneOf', 'allOf']
         for key in unsupported_keys:
             if key in schema:
                 print(f"[INFO] Removing unsupported schema field: {key}")
